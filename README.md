@@ -1,0 +1,2 @@
+# qpu-resource
+Pasqal integration
