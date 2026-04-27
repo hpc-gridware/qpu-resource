@@ -1,2 +1,5 @@
 bin/
-adapter
+/adapter
+/gridware-adapter
+/qrmi-ocs-prolog-go
+/qrmi-ocs-epilog-go

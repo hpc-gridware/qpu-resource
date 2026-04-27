@@ -1,4 +1,4 @@
-// Copyright 2026 Pasqal and its contributors
+// Copyright 2026 Pasqal, HPC Gridware GmbH and its contributors
 // SPDX-License-Identifier: Apache-2.0
 
 package main
@@ -43,7 +43,7 @@ func main() {
 }
 
 func printRootUsage() {
-	fmt.Println("ClusterScheduler QRMI adapter")
+	fmt.Println("Gridware Cluster Scheduler (GCS) / Open Cluster Scheduler (OCS) QRMI adapter")
 	fmt.Println("")
 	fmt.Println("Usage:")
 	fmt.Println("  adapter setup-qrmi-support [flags]")

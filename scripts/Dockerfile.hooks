@@ -1,0 +1,62 @@
+# Copyright 2026 Pasqal and its contributors
+# SPDX-License-Identifier: Apache-2.0
+#
+# Multi-stage Docker build for the Go OCS queue hooks
+# (qrmi-ocs-prolog-go and qrmi-ocs-epilog-go).
+#
+# Stage 1 builds libqrmi from upstream QRMI source so the Go hooks have
+# something to link against. Stage 2 cgo-builds the hooks against those
+# artifacts. Stage 3 exports the binaries plus libqrmi.so to the host.
+#
+# Usage:
+#
+#   DOCKER_BUILDKIT=1 docker build \
+#     --target export \
+#     --output type=local,dest=bin/go-hooks \
+#     -f scripts/Dockerfile.hooks \
+#     --build-arg QRMI_REF=v0.13.3 \
+#     .
+#
+# Outputs in bin/go-hooks:
+#   qrmi-ocs-prolog
+#   qrmi-ocs-epilog
+#   libqrmi.so
+
+ARG QRMI_REF=v0.13.3
+ARG GO_IMAGE=golang:1.24-bookworm
+
+# ---------- Stage 1: build libqrmi.so + qrmi.h from upstream QRMI ----------
+FROM rust:1.91-bookworm AS qrmi-build
+ARG QRMI_REF
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates pkg-config libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+RUN git clone --depth 1 --branch ${QRMI_REF} https://github.com/qiskit-community/qrmi.git /qrmi-src
+WORKDIR /qrmi-src
+RUN cargo build --locked --release --lib
+
+# ---------- Stage 2: cgo-build the Go hooks against libqrmi ----------
+FROM ${GO_IMAGE} AS go-build
+RUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy QRMI artifacts produced in stage 1.
+RUN mkdir -p /qrmi
+COPY --from=qrmi-build /qrmi-src/qrmi.h /qrmi/qrmi.h
+COPY --from=qrmi-build /qrmi-src/target/release/libqrmi.so /qrmi/libqrmi.so
+
+# Copy this repo into the build container.
+COPY . /work
+WORKDIR /work
+
+ENV CGO_ENABLED=1
+ENV CGO_CFLAGS="-I/qrmi"
+ENV CGO_LDFLAGS="-L/qrmi -lqrmi -Wl,-rpath,\$ORIGIN"
+
+RUN go mod download
+RUN go build -tags qrmi -ldflags "-s -w" -o /out/qrmi-ocs-prolog ./src/cmd/qrmi-ocs-prolog-go
+RUN go build -tags qrmi -ldflags "-s -w" -o /out/qrmi-ocs-epilog ./src/cmd/qrmi-ocs-epilog-go
+RUN cp /qrmi/libqrmi.so /out/libqrmi.so
+
+# ---------- Stage 3: export artifacts to the host ----------
+FROM scratch AS export
+COPY --from=go-build /out/ /
