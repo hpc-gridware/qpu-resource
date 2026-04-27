@@ -116,7 +116,30 @@ docker exec ocs-master /bin/bash -lc 'chown gridware:users /tmp/adapter && chmod
 
 ### 2.3) Build queue hooks
 
-Build prolog and epilog on host:
+Two implementations are available; pick one. Both produce binaries with
+the same external contract (env vars, metadata format, exit codes,
+`qacct` fields).
+
+#### Option A: Go hooks (preferred)
+
+Builds happen via Docker; QRMI is cloned and built inside the build
+image so no host-side QRMI checkout is required.
+
+```bash
+cd /shared/gridware-adapter
+make build-go-hooks                    # builds against QRMI v0.13.3
+# or, to pin a different version:
+make build-go-hooks QRMI_REF=v0.13.3
+```
+
+Outputs land in `bin/go-hooks/`:
+- `qrmi-ocs-prolog`
+- `qrmi-ocs-epilog`
+- `libqrmi.so`
+
+Skip ahead to "Copy hooks and QRMI shared lib to master".
+
+#### Option B: Legacy C hooks
 
 ```bash
 mkdir -p /shared/gridware-adapter/bin
@@ -138,13 +161,24 @@ gcc -Wall -Wextra -O2 \
   -lqrmi
 ```
 
-Copy hooks and QRMI shared lib to master:
+#### Copy hooks and QRMI shared lib to master
+
+For Option A, source paths are `bin/go-hooks/`. For Option B, source
+paths are `bin/qrmi-ocs-*` plus `/shared/qrmi/libqrmi-0.12.0/libqrmi.so`.
 
 ```bash
 docker exec ocs-master /bin/bash -lc 'mkdir -p /tmp/qrmi-hooks && chown gridware:users /tmp/qrmi-hooks'
-docker cp /shared/gridware-adapter/bin/qrmi-ocs-prolog ocs-master:/tmp/qrmi-hooks/qrmi-ocs-prolog
-docker cp /shared/gridware-adapter/bin/qrmi-ocs-epilog ocs-master:/tmp/qrmi-hooks/qrmi-ocs-epilog
-docker cp /shared/qrmi/libqrmi-0.12.0/libqrmi.so ocs-master:/tmp/qrmi-hooks/libqrmi.so
+
+# Option A (Go hooks):
+docker cp /shared/gridware-adapter/bin/go-hooks/qrmi-ocs-prolog ocs-master:/tmp/qrmi-hooks/qrmi-ocs-prolog
+docker cp /shared/gridware-adapter/bin/go-hooks/qrmi-ocs-epilog ocs-master:/tmp/qrmi-hooks/qrmi-ocs-epilog
+docker cp /shared/gridware-adapter/bin/go-hooks/libqrmi.so      ocs-master:/tmp/qrmi-hooks/libqrmi.so
+
+# Option B (C hooks):
+# docker cp /shared/gridware-adapter/bin/qrmi-ocs-prolog ocs-master:/tmp/qrmi-hooks/qrmi-ocs-prolog
+# docker cp /shared/gridware-adapter/bin/qrmi-ocs-epilog ocs-master:/tmp/qrmi-hooks/qrmi-ocs-epilog
+# docker cp /shared/qrmi/libqrmi-0.12.0/libqrmi.so      ocs-master:/tmp/qrmi-hooks/libqrmi.so
+
 docker exec ocs-master /bin/bash -lc 'chown gridware:users /tmp/qrmi-hooks/qrmi-ocs-prolog /tmp/qrmi-hooks/qrmi-ocs-epilog /tmp/qrmi-hooks/libqrmi.so && chmod +x /tmp/qrmi-hooks/qrmi-ocs-prolog /tmp/qrmi-hooks/qrmi-ocs-epilog'
 ```
 
