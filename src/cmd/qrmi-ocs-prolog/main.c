@@ -33,6 +33,17 @@ static void log_line(FILE *stream, const char *level, const char *fmt, ...) {
     va_end(args);
 }
 
+#if defined(QRMI_VERSION) && QRMI_VERSION >= QRMI_VERSION_NUMERIC(0,18,0)
+static void log_qrmi_line(const char *level, const char *target, const char *message) {
+    const char *log_level = level == NULL ? "INFO" : level;
+    const char *log_target = target == NULL ? "qrmi" : target;
+    const char *log_message = message == NULL ? "" : message;
+    FILE *stream = strcmp(log_level, "ERROR") == 0 || strcmp(log_level, "WARN") == 0 ? stderr : stdout;
+
+    log_line(stream, log_level, "QRMI %s: %s", log_target, log_message);
+}
+#endif
+
 static char *dup_text(const char *src) {
     size_t len;
     char *out;
@@ -493,6 +504,9 @@ int main(void) {
         set_plugin_error(job_env_file, "failed to set RUST_LOG");
         goto fail;
     }
+#if defined(QRMI_VERSION) && QRMI_VERSION >= QRMI_VERSION_NUMERIC(0,18,0)
+    qrmi_log_callback_set(log_qrmi_line);
+#endif
 
     config = qrmi_config_load(config_path);
     if (config == NULL) {
@@ -667,14 +681,6 @@ int main(void) {
         goto fail;
     }
 
-    if (set_runtime_env(job_env_file, "SLURM_JOB_QPU_RESOURCES", resource_csv, true) != 0) {
-        set_plugin_error(job_env_file, "failed to export SLURM_JOB_QPU_RESOURCES");
-        goto fail;
-    }
-    if (set_runtime_env(job_env_file, "SLURM_JOB_QPU_TYPES", type_csv, true) != 0) {
-        set_plugin_error(job_env_file, "failed to export SLURM_JOB_QPU_TYPES");
-        goto fail;
-    }
     if (set_runtime_env(job_env_file, "QRMI_JOB_QPU_RESOURCES", resource_csv, true) != 0) {
         set_plugin_error(job_env_file, "failed to export QRMI_JOB_QPU_RESOURCES");
         goto fail;

@@ -41,6 +41,7 @@ func main() {
 // means the prolog never recorded an acquisition for this job (for
 // example because the job was rejected before it ran).
 func run() int {
+	qrmi.SetLogCallback(log.QRMILog)
 	metaPath := qrmiocs.ResolveMetadataPath()
 	rec, readErr := qrmiocs.ReadStrictSingle(metaPath)
 	if readErr != nil && errors.Is(readErr, fs.ErrNotExist) {

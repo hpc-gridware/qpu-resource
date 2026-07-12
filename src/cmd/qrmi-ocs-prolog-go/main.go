@@ -58,6 +58,7 @@ func run() error {
 	if err := jobEnv.ApplyDefaultRustLog(); err != nil {
 		return reportError(jobEnv, fmt.Errorf("apply default RUST_LOG: %w", err))
 	}
+	qrmi.SetLogCallback(log.QRMILog)
 
 	qcfg, err := qrmi.LoadConfig(cfg.ConfigPath)
 	if err != nil {
@@ -193,8 +194,6 @@ func exportRuntimeEnv(je *qrmiocs.JobEnv, backend, token string, rec qrmiocs.Rec
 	tokenKey := backend + "_QRMI_JOB_ACQUISITION_TOKEN"
 	pairs := [][2]string{
 		{tokenKey, token},
-		{"SLURM_JOB_QPU_RESOURCES", backend},
-		{"SLURM_JOB_QPU_TYPES", typeStr},
 		{"QRMI_JOB_QPU_RESOURCES", backend},
 		{"QRMI_JOB_QPU_TYPES", typeStr},
 		{"qrmi_resources", backend},

@@ -33,6 +33,17 @@ static void log_line(FILE *stream, const char *level, const char *fmt, ...) {
     va_end(args);
 }
 
+#if defined(QRMI_VERSION) && QRMI_VERSION >= QRMI_VERSION_NUMERIC(0,18,0)
+static void log_qrmi_line(const char *level, const char *target, const char *message) {
+    const char *log_level = level == NULL ? "INFO" : level;
+    const char *log_target = target == NULL ? "qrmi" : target;
+    const char *log_message = message == NULL ? "" : message;
+    FILE *stream = strcmp(log_level, "ERROR") == 0 || strcmp(log_level, "WARN") == 0 ? stderr : stdout;
+
+    log_line(stream, log_level, "QRMI %s: %s", log_target, log_message);
+}
+#endif
+
 static char *dup_text(const char *src) {
     size_t len;
     char *out;
@@ -275,6 +286,10 @@ int main(void) {
     time_t start_ts = time(NULL);
     long elapsed = 0;
     char numbuf[32];
+
+#if defined(QRMI_VERSION) && QRMI_VERSION >= QRMI_VERSION_NUMERIC(0,18,0)
+    qrmi_log_callback_set(log_qrmi_line);
+#endif
 
     if (resolve_metadata_path(metadata_path, sizeof(metadata_path)) != 0) {
         log_line(stderr, "ERROR", "failed to resolve metadata path");

@@ -51,3 +51,6 @@ func (r *Resource) Acquire() (string, error) { return "", ErrNotAvailable }
 
 // Release always returns ErrNotAvailable in stub builds.
 func (r *Resource) Release(token string) error { return ErrNotAvailable }
+
+// SetLogCallback is a no-op in stub builds.
+func SetLogCallback(fn LogFunc) {}

@@ -92,6 +92,7 @@ QrmiResourceDef *qrmi_config_resource_def_get(QrmiConfig *config, const char *re
 const char *qrmi_config_resource_type_to_str(QrmiResourceType type) { (void)type; return "pasqal-cloud"; }
 QrmiReturnCode qrmi_config_resource_def_free(QrmiResourceDef *ptr) { (void)ptr; return QRMI_RETURN_CODE_SUCCESS; }
 const char *qrmi_get_last_error(void) { return ""; }
+void qrmi_log_callback_set(QrmiLogCallback callback) { (void)callback; }
 QrmiQuantumResource *qrmi_resource_new(const char *resource_id, QrmiResourceType resource_type) {
   (void)resource_id;
   (void)resource_type;
@@ -153,6 +154,7 @@ struct QrmiQuantumResource { int dummy; };
 static int g_release_calls = 0;
 
 const char *qrmi_get_last_error(void) { return ""; }
+void qrmi_log_callback_set(QrmiLogCallback callback) { (void)callback; }
 QrmiQuantumResource *qrmi_resource_new(const char *resource_id, QrmiResourceType resource_type) {
   (void)resource_id;
   (void)resource_type;

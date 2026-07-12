@@ -298,7 +298,7 @@ This Gridware/OCS adapter mirrors core SPANK behavior in these areas:
 
 - Loads backend settings from `qrmi_config.json` and exports backend-prefixed `QRMI_*` variables.
 - Sets `RUST_LOG` from scheduler debug level mapping when `RUST_LOG` is not already set.
-- Exports `SLURM_JOB_QPU_RESOURCES` and `SLURM_JOB_QPU_TYPES` for runtime compatibility.
+- Exports `QRMI_JOB_QPU_RESOURCES` and `QRMI_JOB_QPU_TYPES` for runtime compatibility.
 - Acquires in prolog and releases in epilog.
 
 Intentional differences from Slurm SPANK:
