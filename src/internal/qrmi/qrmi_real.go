@@ -9,13 +9,45 @@ package qrmi
 // #include <stdlib.h>
 // #include <stdbool.h>
 // #include "qrmi.h"
+// #if defined(QRMI_HAS_LOG_CALLBACK)
+// extern void qrmiGoLogCallback(char *level, char *target, char *message);
+// static inline void qrmi_set_go_log_callback(void) {
+//     qrmi_log_callback_set((QrmiLogCallback)qrmiGoLogCallback);
+// }
+// #else
+// static inline void qrmi_set_go_log_callback(void) {}
+// #endif
 import "C"
 
 import (
 	"errors"
 	"fmt"
+	"sync"
 	"unsafe"
 )
+
+var (
+	logMu   sync.Mutex
+	logFunc LogFunc
+)
+
+// SetLogCallback routes QRMI Rust logs through fn.
+func SetLogCallback(fn LogFunc) {
+	logMu.Lock()
+	logFunc = fn
+	logMu.Unlock()
+	C.qrmi_set_go_log_callback()
+}
+
+//export qrmiGoLogCallback
+func qrmiGoLogCallback(level, target, message *C.char) {
+	logMu.Lock()
+	fn := logFunc
+	logMu.Unlock()
+	if fn != nil {
+		fn(goStringOrEmpty(level), goStringOrEmpty(target), goStringOrEmpty(message))
+	}
+}
 
 // Config wraps QrmiConfig from libqrmi.
 type Config struct {

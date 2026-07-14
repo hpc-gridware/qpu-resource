@@ -25,3 +25,6 @@ type EnvVar struct {
 	Key   string
 	Value string
 }
+
+// LogFunc receives one QRMI log record from libqrmi.
+type LogFunc func(level, target, message string)

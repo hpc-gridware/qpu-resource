@@ -41,6 +41,25 @@ func (l *Logger) Error(format string, args ...any) {
 	l.write(l.stderr, "ERROR", format, args...)
 }
 
+// QRMILog writes a QRMI runtime log record using the hook logger.
+func (l *Logger) QRMILog(level, target, message string) {
+	if target == "" {
+		target = "qrmi"
+	}
+	switch level {
+	case "ERROR":
+		l.Error("QRMI %s: %s", target, message)
+	case "WARN":
+		l.Warn("QRMI %s: %s", target, message)
+	case "INFO":
+		l.Info("QRMI %s: %s", target, message)
+	case "DEBUG", "TRACE":
+		l.Info("QRMI %s %s: %s", level, target, message)
+	default:
+		l.Info("QRMI %s %s: %s", level, target, message)
+	}
+}
+
 func (l *Logger) write(w io.Writer, level, format string, args ...any) {
 	fmt.Fprintf(w, "%s[%s]: ", l.component, level)
 	fmt.Fprintf(w, format, args...)
