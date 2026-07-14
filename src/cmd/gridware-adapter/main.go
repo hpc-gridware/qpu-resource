@@ -15,6 +15,7 @@ import (
 
 const defaultReportingPattern = "usage_patterns=qrmi:qrmi_*"
 const defaultResourceName = "qpu"
+const defaultReadyResourceName = "qpu_ready"
 const defaultSlotsResourceName = "qpu_slots"
 const defaultSlotsScope = "host"
 
@@ -67,8 +68,12 @@ func runEnsureResource(args []string) error {
 	hostValue := fs.String("host-value", "", "Single backend name assigned to each host's qpu complex value")
 	enableSlots := fs.Bool("enable-qpu-slots", false, "Create qpu_slots and optionally seed host capacity")
 	slotsName := fs.String("qpu-slots-name", defaultSlotsResourceName, "QPU slots complex name")
-	slotsCapacity := fs.Int("qpu-slots-capacity", 1, "QPU slots capacity to set on each host; 0 clears host capacity")
+	slotsCapacity := fs.Int("qpu-slots-capacity", 1, "QPU slots capacity to set on each host; 0 clears host capacity for Load Sensor-owned slots")
 	slotsScope := fs.String("qpu-slots-scope", defaultSlotsScope, "QPU slots capacity scope: host or global")
+	enableLoadSensor := fs.Bool("enable-load-sensor", false, "Create qpu_ready and configure a host Load Sensor")
+	readyName := fs.String("qpu-ready-name", defaultReadyResourceName, "QPU readiness complex name")
+	loadSensorHost := fs.String("load-sensor-host", "", "Execution host that runs the Load Sensor")
+	loadSensorPath := fs.String("load-sensor-path", "", "Load Sensor executable path")
 
 	fs.Usage = func() {
 		fmt.Println("Usage: adapter ensure-resource [flags]")
@@ -105,6 +110,10 @@ func runEnsureResource(args []string) error {
 		*slotsName,
 		*slotsCapacity,
 		*slotsScope,
+		*enableLoadSensor,
+		*readyName,
+		*loadSensorHost,
+		*loadSensorPath,
 	)
 	if err != nil {
 		return err
@@ -121,8 +130,12 @@ func runSetupQRMISupport(args []string) error {
 	hostValue := fs.String("host-value", "", "Single backend name assigned to each host's qpu complex value (required)")
 	enableSlots := fs.Bool("enable-qpu-slots", false, "Create qpu_slots and optionally seed host capacity")
 	slotsName := fs.String("qpu-slots-name", defaultSlotsResourceName, "QPU slots complex name")
-	slotsCapacity := fs.Int("qpu-slots-capacity", 1, "QPU slots capacity to set on each host; 0 clears host capacity")
+	slotsCapacity := fs.Int("qpu-slots-capacity", 1, "QPU slots capacity to set on each host; 0 clears host capacity for Load Sensor-owned slots")
 	slotsScope := fs.String("qpu-slots-scope", defaultSlotsScope, "QPU slots capacity scope: host or global")
+	enableLoadSensor := fs.Bool("enable-load-sensor", false, "Create qpu_ready and configure a host Load Sensor")
+	readyName := fs.String("qpu-ready-name", defaultReadyResourceName, "QPU readiness complex name")
+	loadSensorHost := fs.String("load-sensor-host", "", "Execution host that runs the Load Sensor")
+	loadSensorPath := fs.String("load-sensor-path", "", "Load Sensor executable path")
 
 	queue := fs.String("queue", "", "Cluster queue name (required)")
 	prolog := fs.String("prolog", "", "Queue prolog path, use NONE to disable")
@@ -176,6 +189,10 @@ func runSetupQRMISupport(args []string) error {
 		*slotsName,
 		*slotsCapacity,
 		*slotsScope,
+		*enableLoadSensor,
+		*readyName,
+		*loadSensorHost,
+		*loadSensorPath,
 	)
 	if err != nil {
 		return err
@@ -187,10 +204,14 @@ func runSetupQRMISupport(args []string) error {
 }
 
 type resourceOptions struct {
-	enableSlots   bool
-	slotsName     string
-	slotsCapacity int
-	slotsScope    string
+	enableSlots      bool
+	slotsName        string
+	slotsCapacity    int
+	slotsScope       string
+	enableLoadSensor bool
+	readyName        string
+	loadSensorHost   string
+	loadSensorPath   string
 }
 
 func resourceOptionsFromFlags(
@@ -198,18 +219,32 @@ func resourceOptionsFromFlags(
 	slotsName string,
 	slotsCapacity int,
 	slotsScope string,
+	enableLoadSensor bool,
+	readyName string,
+	loadSensorHost string,
+	loadSensorPath string,
 ) (resourceOptions, error) {
 	opts := resourceOptions{
-		enableSlots:   enableSlots,
-		slotsName:     strings.TrimSpace(slotsName),
-		slotsCapacity: slotsCapacity,
-		slotsScope:    strings.ToLower(strings.TrimSpace(slotsScope)),
+		enableSlots:      enableSlots,
+		slotsName:        strings.TrimSpace(slotsName),
+		slotsCapacity:    slotsCapacity,
+		slotsScope:       strings.ToLower(strings.TrimSpace(slotsScope)),
+		enableLoadSensor: enableLoadSensor,
+		readyName:        strings.TrimSpace(readyName),
+		loadSensorHost:   strings.TrimSpace(loadSensorHost),
+		loadSensorPath:   strings.TrimSpace(loadSensorPath),
 	}
 	if opts.enableSlots && (opts.slotsName == "" || opts.slotsCapacity < 0) {
 		return opts, errors.New("--qpu-slots-name cannot be empty and --qpu-slots-capacity cannot be negative")
 	}
 	if opts.enableSlots && opts.slotsScope != "host" && opts.slotsScope != "global" {
 		return opts, errors.New("--qpu-slots-scope must be host or global")
+	}
+	if opts.enableLoadSensor && (opts.readyName == "" || opts.loadSensorHost == "" || opts.loadSensorPath == "") {
+		return opts, errors.New("--qpu-ready-name, --load-sensor-host, and --load-sensor-path are required with --enable-load-sensor")
+	}
+	if opts.enableLoadSensor && strings.ContainsAny(opts.loadSensorPath, " \t\r\n") {
+		return opts, errors.New("--load-sensor-path must be an executable path without arguments")
 	}
 	return opts, nil
 }
@@ -230,6 +265,18 @@ func ensureResourceDefault(qc qconf.QConf, hosts []string, resolvedHostValue str
 			return err
 		}
 		fmt.Printf("ensured complex entry %q\n", opts.slotsName)
+	}
+	if opts.enableLoadSensor {
+		if _, err := ensureComplexEntry(qc, qpuReadyComplexEntry(opts.readyName)); err != nil {
+			return err
+		}
+		if err := setExecHostResource(qc, "global", opts.readyName, "1"); err != nil {
+			return err
+		}
+		if err := configureHostLoadSensor(qc, opts.loadSensorHost, opts.loadSensorPath); err != nil {
+			return err
+		}
+		fmt.Printf("ensured complex entry %q and Load Sensor on host %s\n", opts.readyName, opts.loadSensorHost)
 	}
 	if opts.enableSlots && opts.slotsScope == "global" {
 		if opts.slotsCapacity > 0 {
@@ -322,6 +369,19 @@ func qpuSlotsComplexEntry(name string) qconf.ComplexEntryConfig {
 	}
 }
 
+func qpuReadyComplexEntry(name string) qconf.ComplexEntryConfig {
+	return qconf.ComplexEntryConfig{
+		Name:        name,
+		Shortcut:    name,
+		Type:        qconf.ResourceTypeInt,
+		Relop:       "<=",
+		Requestable: "YES",
+		Consumable:  qconf.ConsumableNO,
+		Default:     "0",
+		Urgency:     0,
+	}
+}
+
 func complexEntryMatches(current, desired qconf.ComplexEntryConfig) bool {
 	return current.Shortcut == desired.Shortcut &&
 		current.Type == desired.Type &&
@@ -363,6 +423,27 @@ func clearExecHostResource(qc qconf.QConf, host, resourceName string) error {
 	delete(hostCfg.ComplexValues, resourceName)
 	if err := qc.ModifyExecHost(host, hostCfg); err != nil {
 		return fmt.Errorf("modify exechost %q: %w", host, err)
+	}
+	return nil
+}
+
+func configureHostLoadSensor(qc qconf.QConf, host, loadSensorPath string) error {
+	hostCfg, err := qc.ShowHostConfiguration(host)
+	if err != nil {
+		if addErr := qc.AddHostConfiguration(qconf.HostConfiguration{Name: host, LoadSensors: []string{loadSensorPath}}); addErr != nil {
+			return fmt.Errorf("add host configuration %q: %w (original show error: %v)", host, addErr, err)
+		}
+		return nil
+	}
+	hostCfg.Name = host
+	for _, current := range hostCfg.LoadSensors {
+		if current == loadSensorPath {
+			return nil
+		}
+	}
+	hostCfg.LoadSensors = append(hostCfg.LoadSensors, loadSensorPath)
+	if err := qc.ModifyHostConfiguration(host, hostCfg); err != nil {
+		return fmt.Errorf("modify host configuration %q: %w", host, err)
 	}
 	return nil
 }

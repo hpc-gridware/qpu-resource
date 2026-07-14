@@ -67,6 +67,7 @@ qpu-resource
 What is where:
 
 - `src/cmd/gridware-adapter/main.go`: adapter CLI (`setup-qrmi-support`, `ensure-resource`, `configure-queue-hooks`).
+- `src/cmd/qrmi-ocs-load-sensor/main.go`: optional OCS Load Sensor for dynamic QPU readiness.
 - `src/cmd/qrmi-ocs-prolog/main.c`: legacy OCS queue prolog hook (resource/env setup + acquire).
 - `src/cmd/qrmi-ocs-epilog/main.c`: legacy OCS queue epilog hook (release + accounting fields).
 - `src/cmd/qrmi-ocs-prolog-go/main.go`: Go port of the prolog hook (preferred for new deployments).
@@ -88,6 +89,9 @@ The repository ships a Makefile that wraps the Docker-based build flows.
 ```bash
 make build-adapter
 # binary at bin/adapter/adapter
+
+make build-load-sensor
+# binary at bin/adapter/qrmi-ocs-load-sensor
 ```
 
 ### Go OCS hooks (cgo against `libqrmi.so`)
@@ -178,7 +182,9 @@ The key operational model is:
 - Consumable policy: `qpu` is configured as `NO` (backend selector only)
 - Host assignment: one backend name per host (for example `qpu=EMU_FREE`)
 - Optional capacity resource: `qpu_slots` as `INT`, `<=`, `Consumable=JOB`
-- Job request: `-l qpu=<backend>` (for example `-l qpu=EMU_FREE`)
+- Optional readiness resource: `qpu_ready` as `INT`, `<=`, `consumable=NO`
+- Job request without Load Sensor: `-l qpu=<backend>` (for example `-l qpu=EMU_FREE`)
+- Job request with Load Sensor: `-l qpu=<backend>,qpu_slots=1,qpu_ready=1`
 
 ### Admin Quick Checklist
 
@@ -206,6 +212,65 @@ Apply all required OCS-side QRMI setup in one command:
   --prolog /shared/gridware-adapter/bin/qrmi-ocs-prolog \
   --epilog /shared/gridware-adapter/bin/qrmi-ocs-epilog
 ```
+
+Optional Load Sensor setup keeps capacity and readiness separate:
+
+```bash
+./adapter setup-qrmi-support \
+  --hosts ocs-master,ocs-worker1,ocs-worker2 \
+  --host-value PASQAL_LOCAL \
+  --queue all.q \
+  --prolog /shared/gridware-adapter/bin/qrmi-ocs-prolog \
+  --epilog /shared/gridware-adapter/bin/qrmi-ocs-epilog \
+  --enable-qpu-slots \
+  --qpu-slots-capacity 0 \
+  --enable-load-sensor \
+  --load-sensor-host ocs-master \
+  --load-sensor-path /shared/gridware-adapter/bin/qrmi-ocs-load-sensor
+```
+
+Use `--qpu-slots-capacity 0` for Warden-owned Pasqal Local slots. Use a
+positive value only when OCS should own static host-local slot capacity.
+For one statically configured backend shared by several hosts, add
+`--qpu-slots-scope global`.
+
+OCS stores `load_sensor` as an executable path. Put the configuration at
+`/etc/qrmi-ocs-load-sensor.yaml`, or set `QRMI_OCS_LOAD_SENSOR_CONFIG` when
+running the sensor manually. Load Sensor configuration:
+
+```yaml
+load_sensor:
+  enabled: true
+  scope: global
+  resource_name: qpu_ready
+  slots_resource_name: qpu_slots
+  provider: warden
+  timeout_seconds: 3
+
+warden:
+  base_url: http://127.0.0.1:8006
+  endpoint: /accessible
+  tls_verify: true
+
+static:
+  ready: true
+  state_file: ""
+```
+
+The `static` provider either returns `static.ready` or reads `0`/`1` from
+`static.state_file`. It is a dummy readiness signal for paper/demo use and does
+not represent Pasqal Cloud queue availability. The `warden` provider polls
+`GET /accessible`, can report `qpu_slots_available` when Warden is configured
+with `qpu_slots_total`, and fails closed on timeouts, HTTP errors, or malformed
+responses.
+
+The Load Sensor is an early scheduler filter only. The OCS prolog still calls
+QRMI `IsAccessible` and `Acquire`, so a job can still be rejected at dispatch
+time if another scheduler or user consumed the external QPU after OCS scheduled
+the job.
+
+For the Pasqal Local setup, including Warden, MUNGE, QRMI config, and the
+readiness Load Sensor, see `load_sensor.md`.
 
 ### `ensure-resource` (Advanced/Manual)
 

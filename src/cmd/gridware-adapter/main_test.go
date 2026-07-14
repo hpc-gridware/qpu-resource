@@ -29,6 +29,9 @@ func TestDefaultsAreFixed(t *testing.T) {
 	if defaultSlotsResourceName != "qpu_slots" {
 		t.Fatalf("defaultSlotsResourceName mismatch: got=%q", defaultSlotsResourceName)
 	}
+	if defaultReadyResourceName != "qpu_ready" {
+		t.Fatalf("defaultReadyResourceName mismatch: got=%q", defaultReadyResourceName)
+	}
 	if defaultSlotsScope != "host" {
 		t.Fatalf("defaultSlotsScope mismatch: got=%q", defaultSlotsScope)
 	}
@@ -39,22 +42,37 @@ func TestQPUResourceComplexEntries(t *testing.T) {
 	if slots.Type != qconf.ResourceTypeInt || slots.Relop != "<=" || slots.Consumable != qconf.ConsumableJOB {
 		t.Fatalf("qpu_slots shape mismatch: %+v", slots)
 	}
+	ready := qpuReadyComplexEntry(defaultReadyResourceName)
+	if ready.Type != qconf.ResourceTypeInt || ready.Relop != "<=" || ready.Consumable != qconf.ConsumableNO {
+		t.Fatalf("qpu_ready shape mismatch: %+v", ready)
+	}
+	if ready.Default != "0" || ready.Requestable != "YES" {
+		t.Fatalf("qpu_ready default/requestable mismatch: %+v", ready)
+	}
 }
 
 func TestResourceOptionsValidation(t *testing.T) {
-	_, err := resourceOptionsFromFlags(true, "qpu_slots", -1, "host")
+	_, err := resourceOptionsFromFlags(true, "qpu_slots", -1, "host", false, "", "", "")
 	if err == nil {
 		t.Fatal("expected negative slots capacity validation error")
 	}
-	_, err = resourceOptionsFromFlags(true, "qpu_slots", 1, "cluster")
+	_, err = resourceOptionsFromFlags(false, "", 1, "host", true, "qpu_ready", "", "/tmp/sensor")
+	if err == nil {
+		t.Fatal("expected load sensor host validation error")
+	}
+	_, err = resourceOptionsFromFlags(false, "", 1, "host", true, "qpu_ready", "host1", "/tmp/sensor --config /tmp/cfg")
+	if err == nil {
+		t.Fatal("expected load sensor path argument validation error")
+	}
+	_, err = resourceOptionsFromFlags(true, "qpu_slots", 1, "cluster", false, "", "", "")
 	if err == nil {
 		t.Fatal("expected slots scope validation error")
 	}
-	opts, err := resourceOptionsFromFlags(true, " qpu_slots ", 1, " GLOBAL ")
+	opts, err := resourceOptionsFromFlags(true, " qpu_slots ", 1, " GLOBAL ", true, " qpu_ready ", " host1 ", " /tmp/sensor ")
 	if err != nil {
 		t.Fatalf("resourceOptionsFromFlags returned error: %v", err)
 	}
-	if opts.slotsName != "qpu_slots" || opts.slotsScope != "global" {
+	if opts.slotsName != "qpu_slots" || opts.slotsScope != "global" || opts.readyName != "qpu_ready" || opts.loadSensorHost != "host1" || opts.loadSensorPath != "/tmp/sensor" {
 		t.Fatalf("trimmed options mismatch: %+v", opts)
 	}
 }
@@ -125,7 +143,6 @@ QrmiResourceDef *qrmi_config_resource_def_get(QrmiConfig *config, const char *re
 const char *qrmi_config_resource_type_to_str(QrmiResourceType type) { (void)type; return "pasqal-cloud"; }
 QrmiReturnCode qrmi_config_resource_def_free(QrmiResourceDef *ptr) { (void)ptr; return QRMI_RETURN_CODE_SUCCESS; }
 const char *qrmi_get_last_error(void) { return ""; }
-void qrmi_log_callback_set(QrmiLogCallback callback) { (void)callback; }
 QrmiQuantumResource *qrmi_resource_new(const char *resource_id, QrmiResourceType resource_type) {
   (void)resource_id;
   (void)resource_type;
@@ -187,7 +204,6 @@ struct QrmiQuantumResource { int dummy; };
 static int g_release_calls = 0;
 
 const char *qrmi_get_last_error(void) { return ""; }
-void qrmi_log_callback_set(QrmiLogCallback callback) { (void)callback; }
 QrmiQuantumResource *qrmi_resource_new(const char *resource_id, QrmiResourceType resource_type) {
   (void)resource_id;
   (void)resource_type;

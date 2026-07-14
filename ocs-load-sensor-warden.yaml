@@ -1,0 +1,11 @@
+load_sensor:
+  enabled: true
+  scope: global
+  resource_name: qpu_ready
+  provider: warden
+  timeout_seconds: 3
+
+warden:
+  base_url: http://10.100.0.1:4207
+  endpoint: /accessible
+  tls_verify: true
