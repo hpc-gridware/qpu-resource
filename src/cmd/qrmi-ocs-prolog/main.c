@@ -504,7 +504,7 @@ int main(void) {
         set_plugin_error(job_env_file, "failed to set RUST_LOG");
         goto fail;
     }
-#if defined(QRMI_VERSION) && QRMI_VERSION >= QRMI_VERSION_NUMERIC(0,18,0)
+#if defined(QRMI_HAS_LOG_CALLBACK)
     qrmi_log_callback_set(log_qrmi_line);
 #endif
 
