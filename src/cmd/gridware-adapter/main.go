@@ -504,19 +504,45 @@ func configureQueueHooksDefault(qc qconf.QConf, queue, prolog, epilog string) er
 }
 
 func configureQueueHookPaths(qc qconf.QConf, queue, prolog, epilog string) error {
+	prologCommand, err := qrmiQueueHookCommand(prolog, true)
+	if err != nil {
+		return fmt.Errorf("invalid prolog: %w", err)
+	}
+	epilogCommand, err := qrmiQueueHookCommand(epilog, false)
+	if err != nil {
+		return fmt.Errorf("invalid epilog: %w", err)
+	}
 	queueCfg, err := qc.ShowClusterQueue(queue)
 	if err != nil {
 		return fmt.Errorf("show queue %q: %w", queue, err)
 	}
 	queueCfg.Name = queue
-	queueCfg.Prolog = []string{strings.TrimSpace(prolog)}
-	queueCfg.Epilog = []string{strings.TrimSpace(epilog)}
+	queueCfg.Prolog = []string{prologCommand}
+	queueCfg.Epilog = []string{epilogCommand}
 
 	if err := qc.ModifyClusterQueue(queue, queueCfg); err != nil {
 		return fmt.Errorf("modify queue %q hooks: %w", queue, err)
 	}
-	fmt.Printf("updated queue hooks on %q: prolog=%q epilog=%q\n", queue, prolog, epilog)
+	fmt.Printf("updated queue hooks on %q: prolog=%q epilog=%q\n", queue, prologCommand, epilogCommand)
 	return nil
+}
+
+func qrmiQueueHookCommand(path string, passJobOwner bool) (string, error) {
+	command := strings.TrimSpace(path)
+	if command == "NONE" {
+		return command, nil
+	}
+	if strings.ContainsAny(command, " \t\r\n") {
+		return "", errors.New("hook path must not contain whitespace")
+	}
+	if strings.Contains(command, "@") {
+		return "", errors.New("hook path must not contain a user prefix")
+	}
+	command = "root@" + command
+	if passJobOwner {
+		command += " $job_owner"
+	}
+	return command, nil
 }
 
 func configureGlobalQRMIReporting(qc qconf.QConf) error {

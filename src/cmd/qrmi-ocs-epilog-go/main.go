@@ -59,8 +59,12 @@ func run() int {
 		failed = 1
 	}
 
-	if err := os.Remove(metaPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		log.Warn("failed to remove metadata file %s: %v", metaPath, err)
+	if failed == 0 {
+		if err := os.Remove(metaPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			log.Warn("failed to remove metadata file %s: %v", metaPath, err)
+		}
+	} else {
+		log.Warn("retaining metadata file %s for administrator recovery", metaPath)
 	}
 
 	elapsed := int64(time.Since(start).Seconds())

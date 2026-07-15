@@ -102,6 +102,36 @@ func TestParseSingleBackendName(t *testing.T) {
 	}
 }
 
+func TestQRMIQueueHookCommand(t *testing.T) {
+	tests := []struct {
+		name         string
+		path         string
+		passJobOwner bool
+		want         string
+	}{
+		{name: "prolog", path: "/opt/qrmi/prolog", passJobOwner: true, want: "root@/opt/qrmi/prolog $job_owner"},
+		{name: "epilog", path: "/opt/qrmi/epilog", want: "root@/opt/qrmi/epilog"},
+		{name: "disabled", path: "NONE", passJobOwner: true, want: "NONE"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := qrmiQueueHookCommand(tt.path, tt.passJobOwner)
+			if err != nil {
+				t.Fatalf("qrmiQueueHookCommand returned error: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("qrmiQueueHookCommand mismatch: got=%q want=%q", got, tt.want)
+			}
+		})
+	}
+	if _, err := qrmiQueueHookCommand("/opt/qrmi/prolog --flag", true); err == nil {
+		t.Fatal("expected whitespace in hook path to be rejected")
+	}
+	if _, err := qrmiQueueHookCommand("qrmi@/opt/qrmi/prolog", true); err == nil {
+		t.Fatal("expected an explicit hook user to be rejected")
+	}
+}
+
 func TestSetupQRMISupportFlagValidation(t *testing.T) {
 	err := runSetupQRMISupport([]string{})
 	if err == nil || err.Error() != "--hosts is required" {
@@ -143,6 +173,7 @@ QrmiResourceDef *qrmi_config_resource_def_get(QrmiConfig *config, const char *re
 const char *qrmi_config_resource_type_to_str(QrmiResourceType type) { (void)type; return "pasqal-cloud"; }
 QrmiReturnCode qrmi_config_resource_def_free(QrmiResourceDef *ptr) { (void)ptr; return QRMI_RETURN_CODE_SUCCESS; }
 const char *qrmi_get_last_error(void) { return ""; }
+QrmiReturnCode qrmi_log_callback_set(QrmiLogCallback callback) { (void)callback; return QRMI_RETURN_CODE_SUCCESS; }
 QrmiQuantumResource *qrmi_resource_new(const char *resource_id, QrmiResourceType resource_type) {
   (void)resource_id;
   (void)resource_type;
@@ -174,16 +205,42 @@ QrmiReturnCode qrmi_resource_release(QrmiQuantumResource *qrmi, const char *acqu
 int main(void) {
   QrmiKeyValue kv = { .key = "QRMI_SAMPLE", .value = "from_config" };
   QrmiEnvironmentVariables env = { .variables = &kv, .length = 1 };
+  uid_t uid;
   FILE *job_env;
+  FILE *qstat;
+  char qstat_template[] = "/tmp/qrmi_qstat_XXXXXX";
+  char *requested = NULL;
+  int qstat_fd;
   const char *value;
   if (setenv("test_backend_QRMI_SAMPLE", "override", 1) != 0) { return 90; }
   job_env = tmpfile();
   if (job_env == NULL) { return 91; }
   if (apply_backend_env(job_env, "test_backend", env) != 0) { return 1; }
   value = getenv("test_backend_QRMI_SAMPLE");
-  fclose(job_env);
   if (value == NULL) { return 2; }
   if (strcmp(value, "from_config") != 0) { return 3; }
+  if (scheduler_job_uid(NULL, &uid) != 0 || uid != getuid()) { return 4; }
+  if (setenv("SGE_HGR_qpu_slots", "5.000000", 1) != 0) { return 5; }
+  if (export_scheduler_slots(job_env) != 0) { return 6; }
+  value = getenv("QRMI_JOB_QPU_SLOTS");
+  fclose(job_env);
+  if (value == NULL || strcmp(value, "5") != 0) { return 7; }
+  qstat_fd = mkstemp(qstat_template);
+  if (qstat_fd < 0) { return 8; }
+  qstat = fdopen(qstat_fd, "w");
+  if (qstat == NULL) { close(qstat_fd); return 9; }
+  if (fprintf(qstat, "#!/bin/sh\nprintf '%%%%s\\n' 'hard_resource_list: qpu=test_backend,qpu_slots=3'\n") < 0) { return 10; }
+  if (fclose(qstat) != 0 || chmod(qstat_template, 0700) != 0) { return 11; }
+  if (unsetenv("SGE_HGR_qpu_slots") != 0 || unsetenv("SGE_SGR_qpu_slots") != 0) { return 12; }
+  if (setenv("QRMI_OCS_QSTAT_PATH", qstat_template, 1) != 0 || setenv("JOB_ID", "42", 1) != 0) { return 13; }
+  if (read_job_requested_resource("qpu", &requested) != 0 || strcmp(requested, "test_backend") != 0) { return 14; }
+  free(requested);
+  job_env = tmpfile();
+  if (job_env == NULL || export_scheduler_slots(job_env) != 0) { return 15; }
+  fclose(job_env);
+  value = getenv("QRMI_JOB_QPU_SLOTS");
+  unlink(qstat_template);
+  if (value == NULL || strcmp(value, "3") != 0) { return 16; }
   return 0;
 }
 `, cIncludePath(prologMain)),
@@ -204,6 +261,7 @@ struct QrmiQuantumResource { int dummy; };
 static int g_release_calls = 0;
 
 const char *qrmi_get_last_error(void) { return ""; }
+QrmiReturnCode qrmi_log_callback_set(QrmiLogCallback callback) { (void)callback; return QRMI_RETURN_CODE_SUCCESS; }
 QrmiQuantumResource *qrmi_resource_new(const char *resource_id, QrmiResourceType resource_type) {
   (void)resource_id;
   (void)resource_type;

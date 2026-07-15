@@ -15,9 +15,11 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -35,15 +37,28 @@ const (
 )
 
 var log = qrmiocs.NewLogger(component)
+var errRequestedResourceNotFound = errors.New("requested resource not found")
 
 func main() {
-	if err := run(); err != nil {
+	if len(os.Args) > 2 {
+		log.Error("expected at most one job-owner argument")
+		os.Exit(1)
+	}
+	jobOwner := ""
+	if len(os.Args) == 2 {
+		jobOwner = os.Args[1]
+	}
+	if err := runForOwner(jobOwner); err != nil {
 		log.Error("%v", err)
 		os.Exit(1)
 	}
 }
 
 func run() error {
+	return runForOwner("")
+}
+
+func runForOwner(jobOwner string) error {
 	cfg := loadHookConfig()
 
 	granted, err := readGranted(cfg.ResourceName)
@@ -81,7 +96,7 @@ func run() error {
 	if err := exportBackendEnv(jobEnv, backend, def.Environments()); err != nil {
 		return reportError(jobEnv, fmt.Errorf("apply backend env for %s: %w", backend, err))
 	}
-	if err := exportSchedulerJobEnv(jobEnv, cfg.SlotsResourceName); err != nil {
+	if err := exportSchedulerJobEnv(jobEnv, cfg.SlotsResourceName, jobOwner); err != nil {
 		return reportError(jobEnv, fmt.Errorf("export scheduler job env: %w", err))
 	}
 
@@ -167,10 +182,10 @@ func loadHookConfig() hookConfig {
 }
 
 // readGranted returns the value of the scheduler's granted-resource env
-// variable. It tries SGE_HGR_<resource> first (hard request) then
-// SGE_SGR_<resource> (soft request). Some OCS releases only export
-// consumable grants, so a non-consumable host selector is read from the
-// selected execution host's complex_values as a fallback.
+// variable. It tries SGE_HGR_<resource> first (hard request), then
+// SGE_SGR_<resource> (soft request), and then the dispatched job's qstat
+// resource list. The selected host's complex_values is the final fallback
+// for non-consumable host selectors.
 func readGranted(resourceName string) (string, error) {
 	if v := os.Getenv("SGE_HGR_" + resourceName); v != "" {
 		return v, nil
@@ -178,10 +193,62 @@ func readGranted(resourceName string) (string, error) {
 	if v := os.Getenv("SGE_SGR_" + resourceName); v != "" {
 		return v, nil
 	}
+	if v, err := readJobRequestedResource(resourceName); err == nil {
+		return v, nil
+	}
 	if v, err := readHostComplexValue(resourceName); err == nil && v != "" {
 		return v, nil
 	}
 	return "", fmt.Errorf("no granted value found in SGE_HGR_%s or SGE_SGR_%s", resourceName, resourceName)
+}
+
+func readJobRequestedResource(resourceName string) (string, error) {
+	jobID := os.Getenv("JOB_ID")
+	if jobID == "" {
+		return "", errRequestedResourceNotFound
+	}
+	out, err := exec.Command(qstatPath(), "-j", jobID).Output()
+	if err != nil {
+		return "", fmt.Errorf("read scheduler state for job %s: %w", jobID, err)
+	}
+	return parseJobRequestedResource(out, resourceName)
+}
+
+func parseJobRequestedResource(out []byte, resourceName string) (string, error) {
+	for _, field := range []string{"hard_resource_list:", "soft_resource_list:"} {
+		if value, ok := parseResourceListField(out, field, resourceName); ok {
+			return value, nil
+		}
+	}
+	return "", fmt.Errorf("%w: %s", errRequestedResourceNotFound, resourceName)
+}
+
+func parseResourceListField(out []byte, field, resourceName string) (string, bool) {
+	scanner := bufio.NewScanner(bytes.NewReader(out))
+	var values strings.Builder
+	collecting := false
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, field) {
+			collecting = true
+			values.WriteString(strings.TrimSpace(strings.TrimPrefix(line, field)))
+			continue
+		}
+		if collecting && (strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t")) {
+			values.WriteString(strings.TrimSpace(line))
+			continue
+		}
+		if collecting {
+			break
+		}
+	}
+	for _, item := range strings.Split(strings.ReplaceAll(values.String(), "\\", ""), ",") {
+		key, value, ok := strings.Cut(strings.TrimSpace(item), "=")
+		if ok && strings.TrimSpace(key) == resourceName {
+			return strings.TrimSpace(value), true
+		}
+	}
+	return "", false
 }
 
 func readHostComplexValue(resourceName string) (string, error) {
@@ -207,6 +274,16 @@ func qconfPath() string {
 		return filepath.Join(dir, "qconf")
 	}
 	return "qconf"
+}
+
+func qstatPath() string {
+	if p := os.Getenv("QRMI_OCS_QSTAT_PATH"); p != "" {
+		return p
+	}
+	if dir := os.Getenv("SGE_BINARY_PATH"); dir != "" {
+		return filepath.Join(dir, "qstat")
+	}
+	return "qstat"
 }
 
 func parseHostComplexValue(out []byte, resourceName string) (string, error) {
@@ -261,9 +338,13 @@ func exportBackendEnv(je *qrmiocs.JobEnv, backend string, env []qrmi.EnvVar) err
 	return nil
 }
 
-func exportSchedulerJobEnv(je *qrmiocs.JobEnv, slotsResourceName string) error {
+func exportSchedulerJobEnv(je *qrmiocs.JobEnv, slotsResourceName, jobOwner string) error {
+	uid, err := schedulerJobUID(jobOwner)
+	if err != nil {
+		return err
+	}
 	pairs := [][2]string{
-		{"QRMI_JOB_UID", strconv.Itoa(os.Getuid())},
+		{"QRMI_JOB_UID", strconv.Itoa(uid)},
 		{"QRMI_JOB_ID", os.Getenv("JOB_ID")},
 	}
 	if slotsResourceName != "" {
@@ -284,13 +365,35 @@ func exportSchedulerJobEnv(je *qrmiocs.JobEnv, slotsResourceName string) error {
 	return nil
 }
 
+func schedulerJobUID(jobOwner string) (int, error) {
+	if jobOwner == "" {
+		return os.Getuid(), nil
+	}
+	account, err := user.Lookup(jobOwner)
+	if err != nil {
+		return 0, fmt.Errorf("look up scheduler job owner %q: %w", jobOwner, err)
+	}
+	uid, err := strconv.Atoi(account.Uid)
+	if err != nil || uid < 0 {
+		return 0, fmt.Errorf("invalid uid %q for scheduler job owner %q", account.Uid, jobOwner)
+	}
+	return uid, nil
+}
+
 func readGrantedSlots(resourceName string) (int, bool, error) {
 	raw := os.Getenv("SGE_HGR_" + resourceName)
 	if raw == "" {
 		raw = os.Getenv("SGE_SGR_" + resourceName)
 	}
 	if raw == "" {
-		return 0, false, nil
+		var err error
+		raw, err = readJobRequestedResource(resourceName)
+		if errors.Is(err, errRequestedResourceNotFound) {
+			return 0, false, nil
+		}
+		if err != nil {
+			return 0, false, err
+		}
 	}
 	slots, err := parseGrantedSlots(raw)
 	if err != nil {

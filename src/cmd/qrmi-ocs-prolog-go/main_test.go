@@ -6,7 +6,9 @@ package main
 import (
 	"errors"
 	"os"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -31,6 +33,7 @@ var _ = Describe("prolog run()", func() {
 		GinkgoT().Setenv("QRMI_OCS_RESOURCE_NAME", "")
 		GinkgoT().Setenv("QRMI_OCS_SLOTS_RESOURCE_NAME", "")
 		GinkgoT().Setenv("QRMI_OCS_QCONF_PATH", "")
+		GinkgoT().Setenv("QRMI_OCS_QSTAT_PATH", "")
 		GinkgoT().Setenv("QRMI_OCS_LOG_LEVEL", "")
 		GinkgoT().Setenv("RUST_LOG", "")
 		GinkgoT().Setenv("HOST", "")
@@ -123,6 +126,27 @@ var _ = Describe("prolog run()", func() {
 		Expect(value).To(Equal("PASQAL_LOCAL"))
 	})
 
+	It("reads backend and slots from scheduler job state", func() {
+		spool := GinkgoT().TempDir()
+		qstat := filepath.Join(spool, "qstat")
+		err := os.WriteFile(
+			qstat,
+			[]byte("#!/bin/sh\nprintf '%s\\n' 'hard_resource_list: qpu=PASQAL_LOCAL,qpu_slots=3'\n"),
+			0o755,
+		)
+		Expect(err).NotTo(HaveOccurred())
+		GinkgoT().Setenv("JOB_ID", "1234")
+		GinkgoT().Setenv("QRMI_OCS_QSTAT_PATH", qstat)
+
+		backend, err := readGranted("qpu")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(backend).To(Equal("PASQAL_LOCAL"))
+		slots, ok, err := readGrantedSlots("qpu_slots")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(ok).To(BeTrue())
+		Expect(slots).To(Equal(3))
+	})
+
 	It("exports scheduler job id and uid for Pasqal Local", func() {
 		spool := GinkgoT().TempDir()
 		jobEnv, err := qrmiocs.OpenJobEnv()
@@ -135,11 +159,13 @@ var _ = Describe("prolog run()", func() {
 		jobEnv, err = qrmiocs.OpenJobEnv()
 		Expect(err).NotTo(HaveOccurred())
 		defer jobEnv.Close()
-		Expect(exportSchedulerJobEnv(jobEnv, defaultSlotsResourceName)).To(Succeed())
+		account, err := user.Current()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(exportSchedulerJobEnv(jobEnv, defaultSlotsResourceName, account.Username)).To(Succeed())
 
 		data, err := os.ReadFile(filepath.Join(spool, "environment"))
 		Expect(err).NotTo(HaveOccurred())
-		Expect(string(data)).To(ContainSubstring("QRMI_JOB_UID="))
+		Expect(string(data)).To(ContainSubstring("QRMI_JOB_UID=" + strconv.Itoa(os.Getuid()) + "\n"))
 		Expect(string(data)).To(ContainSubstring("QRMI_JOB_ID=1234\n"))
 		Expect(string(data)).To(ContainSubstring("QRMI_JOB_QPU_SLOTS=5\n"))
 	})

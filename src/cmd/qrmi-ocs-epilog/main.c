@@ -4,12 +4,14 @@
 #define _GNU_SOURCE
 
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -33,7 +35,25 @@ static void log_line(FILE *stream, const char *level, const char *fmt, ...) {
     va_end(args);
 }
 
-#if defined(QRMI_VERSION) && QRMI_VERSION >= QRMI_VERSION_NUMERIC(0,18,0)
+static FILE *open_append_private(const char *path) {
+    int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0600);
+    if (fd < 0) {
+        return NULL;
+    }
+    if (fchmod(fd, 0600) != 0) {
+        int chmod_errno = errno;
+        close(fd);
+        errno = chmod_errno;
+        return NULL;
+    }
+    FILE *file = fdopen(fd, "a");
+    if (file == NULL) {
+        close(fd);
+    }
+    return file;
+}
+
+#if defined(QRMI_HAS_LOG_CALLBACK)
 static void log_qrmi_line(const char *level, const char *target, const char *message) {
     const char *log_level = level == NULL ? "INFO" : level;
     const char *log_target = target == NULL ? "qrmi" : target;
@@ -307,7 +327,7 @@ int main(void) {
     }
 
     if (resolve_job_env_path(job_env_path, sizeof(job_env_path)) == 0) {
-        job_env = fopen(job_env_path, "a");
+        job_env = open_append_private(job_env_path);
         if (job_env == NULL) {
             log_line(stderr, "WARN", "failed to open job env file %s: %s", job_env_path, strerror(errno));
         }
@@ -322,7 +342,7 @@ int main(void) {
             total = 1;
             if (parse_record_line(line, &record) != 0) {
                 failed = 1;
-                log_line(stderr, "ERROR", "failed to parse metadata line: %s", line);
+                log_line(stderr, "ERROR", "failed to parse metadata line");
                 break;
             }
             have_record = true;
@@ -350,8 +370,12 @@ int main(void) {
     free_record(&record);
     fclose(metadata);
     metadata = NULL;
-    if (unlink(metadata_path) != 0 && errno != ENOENT) {
-        log_line(stderr, "WARN", "failed to remove metadata file %s: %s", metadata_path, strerror(errno));
+    if (failed == 0) {
+        if (unlink(metadata_path) != 0 && errno != ENOENT) {
+            log_line(stderr, "WARN", "failed to remove metadata file %s: %s", metadata_path, strerror(errno));
+        }
+    } else {
+        log_line(stderr, "WARN", "retaining metadata file %s for administrator recovery", metadata_path);
     }
 
     elapsed = (long)(time(NULL) - start_ts);

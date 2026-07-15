@@ -14,7 +14,7 @@
 #     --target export \
 #     --output type=local,dest=bin/go-hooks \
 #     -f scripts/Dockerfile.hooks \
-#     --build-arg QRMI_REF=v0.13.3 \
+#     --build-arg QRMI_REF=v0.20.0 \
 #     .
 #
 # Outputs in bin/go-hooks:
@@ -22,7 +22,7 @@
 #   qrmi-ocs-epilog
 #   libqrmi.so
 
-ARG QRMI_REF=v0.13.3
+ARG QRMI_REF=v0.20.0
 ARG GO_IMAGE=golang:1.24-bookworm
 
 # ---------- Stage 1: build libqrmi.so + qrmi.h from upstream QRMI ----------

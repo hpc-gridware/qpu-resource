@@ -116,21 +116,21 @@ func ReadStrictSingle(path string) (Record, error) {
 func parseRecordLine(line string) (Record, error) {
 	fields := strings.Split(line, "\t")
 	if len(fields) < 3 {
-		return Record{}, fmt.Errorf("malformed metadata line: %q", line)
+		return Record{}, errors.New("malformed metadata line")
 	}
 	name, typeText, token := fields[0], fields[1], fields[2]
 	if name == "" || typeText == "" || token == "" {
-		return Record{}, fmt.Errorf("malformed metadata line: %q", line)
+		return Record{}, errors.New("malformed metadata line")
 	}
 	typ, err := strconv.Atoi(typeText)
 	if err != nil || typ < 0 {
-		return Record{}, fmt.Errorf("invalid type %q in line %q", typeText, line)
+		return Record{}, errors.New("invalid resource type in metadata line")
 	}
 	var epoch int64
 	if len(fields) >= 4 && fields[3] != "" {
 		epoch, err = strconv.ParseInt(fields[3], 10, 64)
 		if err != nil {
-			return Record{}, fmt.Errorf("invalid epoch %q in line %q", fields[3], line)
+			return Record{}, errors.New("invalid acquisition time in metadata line")
 		}
 	}
 	return Record{Name: name, Type: typ, Token: token, AcquiredEpoch: epoch}, nil
