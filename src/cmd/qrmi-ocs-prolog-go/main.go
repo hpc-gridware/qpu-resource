@@ -13,9 +13,14 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/hpc-gridware/qpu-resource/src/internal/qrmi"
@@ -23,9 +28,10 @@ import (
 )
 
 const (
-	defaultConfigPath   = "/etc/qrmi/qrmi_config.json"
-	defaultResourceName = "qpu"
-	component           = "qrmi-ocs-prolog"
+	defaultConfigPath        = "/etc/qrmi/qrmi_config.json"
+	defaultResourceName      = "qpu"
+	defaultSlotsResourceName = "qpu_slots"
+	component                = "qrmi-ocs-prolog"
 )
 
 var log = qrmiocs.NewLogger(component)
@@ -74,6 +80,9 @@ func run() error {
 
 	if err := exportBackendEnv(jobEnv, backend, def.Environments()); err != nil {
 		return reportError(jobEnv, fmt.Errorf("apply backend env for %s: %w", backend, err))
+	}
+	if err := exportSchedulerJobEnv(jobEnv, cfg.SlotsResourceName); err != nil {
+		return reportError(jobEnv, fmt.Errorf("export scheduler job env: %w", err))
 	}
 
 	resource, err := qrmi.NewResource(backend, def.Type())
@@ -134,14 +143,16 @@ func run() error {
 // the prolog's behavior. Keeping them in one struct makes the run loop
 // easier to read.
 type hookConfig struct {
-	ConfigPath   string
-	ResourceName string
+	ConfigPath        string
+	ResourceName      string
+	SlotsResourceName string
 }
 
 func loadHookConfig() hookConfig {
 	cfg := hookConfig{
-		ConfigPath:   os.Getenv("QRMI_OCS_CONFIG_PATH"),
-		ResourceName: os.Getenv("QRMI_OCS_RESOURCE_NAME"),
+		ConfigPath:        os.Getenv("QRMI_OCS_CONFIG_PATH"),
+		ResourceName:      os.Getenv("QRMI_OCS_RESOURCE_NAME"),
+		SlotsResourceName: os.Getenv("QRMI_OCS_SLOTS_RESOURCE_NAME"),
 	}
 	if cfg.ConfigPath == "" {
 		cfg.ConfigPath = defaultConfigPath
@@ -149,13 +160,17 @@ func loadHookConfig() hookConfig {
 	if cfg.ResourceName == "" {
 		cfg.ResourceName = defaultResourceName
 	}
+	if cfg.SlotsResourceName == "" {
+		cfg.SlotsResourceName = defaultSlotsResourceName
+	}
 	return cfg
 }
 
 // readGranted returns the value of the scheduler's granted-resource env
 // variable. It tries SGE_HGR_<resource> first (hard request) then
-// SGE_SGR_<resource> (soft request) so the prolog supports both
-// scheduling paths the C version supports.
+// SGE_SGR_<resource> (soft request). Some OCS releases only export
+// consumable grants, so a non-consumable host selector is read from the
+// selected execution host's complex_values as a fallback.
 func readGranted(resourceName string) (string, error) {
 	if v := os.Getenv("SGE_HGR_" + resourceName); v != "" {
 		return v, nil
@@ -163,7 +178,67 @@ func readGranted(resourceName string) (string, error) {
 	if v := os.Getenv("SGE_SGR_" + resourceName); v != "" {
 		return v, nil
 	}
+	if v, err := readHostComplexValue(resourceName); err == nil && v != "" {
+		return v, nil
+	}
 	return "", fmt.Errorf("no granted value found in SGE_HGR_%s or SGE_SGR_%s", resourceName, resourceName)
+}
+
+func readHostComplexValue(resourceName string) (string, error) {
+	host := os.Getenv("HOST")
+	if host == "" {
+		host = os.Getenv("HOSTNAME")
+	}
+	if host == "" {
+		return "", fmt.Errorf("HOST is not set")
+	}
+	out, err := exec.Command(qconfPath(), "-se", host).Output()
+	if err != nil {
+		return "", err
+	}
+	return parseHostComplexValue(out, resourceName)
+}
+
+func qconfPath() string {
+	if p := os.Getenv("QRMI_OCS_QCONF_PATH"); p != "" {
+		return p
+	}
+	if dir := os.Getenv("SGE_BINARY_PATH"); dir != "" {
+		return filepath.Join(dir, "qconf")
+	}
+	return "qconf"
+}
+
+func parseHostComplexValue(out []byte, resourceName string) (string, error) {
+	scanner := bufio.NewScanner(bytes.NewReader(out))
+	var values strings.Builder
+	collecting := false
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "complex_values") {
+			collecting = true
+			values.WriteString(strings.TrimSpace(strings.TrimPrefix(line, "complex_values")))
+			continue
+		}
+		if collecting && (strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t")) {
+			values.WriteByte(',')
+			values.WriteString(strings.TrimSpace(line))
+			continue
+		}
+		if collecting {
+			break
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return "", err
+	}
+	for _, item := range strings.Split(strings.ReplaceAll(values.String(), "\\", ""), ",") {
+		key, value, ok := strings.Cut(strings.TrimSpace(item), "=")
+		if ok && strings.TrimSpace(key) == resourceName {
+			return strings.TrimSpace(value), nil
+		}
+	}
+	return "", fmt.Errorf("%s not found in host complex_values", resourceName)
 }
 
 // exportBackendEnv applies the backend-prefixed environment variables
@@ -184,6 +259,60 @@ func exportBackendEnv(je *qrmiocs.JobEnv, backend string, env []qrmi.EnvVar) err
 		}
 	}
 	return nil
+}
+
+func exportSchedulerJobEnv(je *qrmiocs.JobEnv, slotsResourceName string) error {
+	pairs := [][2]string{
+		{"QRMI_JOB_UID", strconv.Itoa(os.Getuid())},
+		{"QRMI_JOB_ID", os.Getenv("JOB_ID")},
+	}
+	if slotsResourceName != "" {
+		if slots, ok, err := readGrantedSlots(slotsResourceName); err != nil {
+			return err
+		} else if ok {
+			pairs = append(pairs, [2]string{"QRMI_JOB_QPU_SLOTS", strconv.Itoa(slots)})
+		}
+	}
+	for _, kv := range pairs {
+		if kv[1] == "" {
+			continue
+		}
+		if err := je.Set(kv[0], kv[1]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func readGrantedSlots(resourceName string) (int, bool, error) {
+	raw := os.Getenv("SGE_HGR_" + resourceName)
+	if raw == "" {
+		raw = os.Getenv("SGE_SGR_" + resourceName)
+	}
+	if raw == "" {
+		return 0, false, nil
+	}
+	slots, err := parseGrantedSlots(raw)
+	if err != nil {
+		return 0, false, fmt.Errorf("parse granted %s value %q: %w", resourceName, raw, err)
+	}
+	return slots, true, nil
+}
+
+func parseGrantedSlots(raw string) (int, error) {
+	raw = strings.TrimSpace(raw)
+	if value, _, ok := strings.Cut(raw, "("); ok {
+		raw = strings.TrimSpace(value)
+	}
+	value, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return 0, err
+	}
+	slots := int(value)
+	if slots < 1 || float64(slots) != value {
+		return 0, fmt.Errorf("slot count must be a positive integer")
+	}
+	return slots, nil
 }
 
 // exportRuntimeEnv writes the standard set of runtime variables into the

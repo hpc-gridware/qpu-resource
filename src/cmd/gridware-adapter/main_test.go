@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+
+	qconf "github.com/hpc-gridware/go-clusterscheduler/pkg/qconf/v9.0"
 )
 
 func TestParseCSVTrimsAndDropsEmpty(t *testing.T) {
@@ -23,6 +25,37 @@ func TestDefaultsAreFixed(t *testing.T) {
 	}
 	if defaultReportingPattern != "usage_patterns=qrmi:qrmi_*" {
 		t.Fatalf("defaultReportingPattern mismatch: got=%q", defaultReportingPattern)
+	}
+	if defaultSlotsResourceName != "qpu_slots" {
+		t.Fatalf("defaultSlotsResourceName mismatch: got=%q", defaultSlotsResourceName)
+	}
+	if defaultSlotsScope != "host" {
+		t.Fatalf("defaultSlotsScope mismatch: got=%q", defaultSlotsScope)
+	}
+}
+
+func TestQPUResourceComplexEntries(t *testing.T) {
+	slots := qpuSlotsComplexEntry(defaultSlotsResourceName)
+	if slots.Type != qconf.ResourceTypeInt || slots.Relop != "<=" || slots.Consumable != qconf.ConsumableJOB {
+		t.Fatalf("qpu_slots shape mismatch: %+v", slots)
+	}
+}
+
+func TestResourceOptionsValidation(t *testing.T) {
+	_, err := resourceOptionsFromFlags(true, "qpu_slots", -1, "host")
+	if err == nil {
+		t.Fatal("expected negative slots capacity validation error")
+	}
+	_, err = resourceOptionsFromFlags(true, "qpu_slots", 1, "cluster")
+	if err == nil {
+		t.Fatal("expected slots scope validation error")
+	}
+	opts, err := resourceOptionsFromFlags(true, " qpu_slots ", 1, " GLOBAL ")
+	if err != nil {
+		t.Fatalf("resourceOptionsFromFlags returned error: %v", err)
+	}
+	if opts.slotsName != "qpu_slots" || opts.slotsScope != "global" {
+		t.Fatalf("trimmed options mismatch: %+v", opts)
 	}
 }
 

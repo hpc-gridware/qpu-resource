@@ -15,6 +15,8 @@ import (
 
 const defaultReportingPattern = "usage_patterns=qrmi:qrmi_*"
 const defaultResourceName = "qpu"
+const defaultSlotsResourceName = "qpu_slots"
+const defaultSlotsScope = "host"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -63,6 +65,10 @@ func runEnsureResource(args []string) error {
 
 	hostsCSV := fs.String("hosts", "", "Comma-separated execution hosts to update")
 	hostValue := fs.String("host-value", "", "Single backend name assigned to each host's qpu complex value")
+	enableSlots := fs.Bool("enable-qpu-slots", false, "Create qpu_slots and optionally seed host capacity")
+	slotsName := fs.String("qpu-slots-name", defaultSlotsResourceName, "QPU slots complex name")
+	slotsCapacity := fs.Int("qpu-slots-capacity", 1, "QPU slots capacity to set on each host; 0 clears host capacity")
+	slotsScope := fs.String("qpu-slots-scope", defaultSlotsScope, "QPU slots capacity scope: host or global")
 
 	fs.Usage = func() {
 		fmt.Println("Usage: adapter ensure-resource [flags]")
@@ -94,7 +100,16 @@ func runEnsureResource(args []string) error {
 		return fmt.Errorf("create qconf client: %w", err)
 	}
 
-	return ensureResourceDefault(qc, parseCSV(*hostsCSV), resolvedHostValue)
+	opts, err := resourceOptionsFromFlags(
+		*enableSlots,
+		*slotsName,
+		*slotsCapacity,
+		*slotsScope,
+	)
+	if err != nil {
+		return err
+	}
+	return ensureResourceDefault(qc, parseCSV(*hostsCSV), resolvedHostValue, opts)
 }
 
 func runSetupQRMISupport(args []string) error {
@@ -104,6 +119,10 @@ func runSetupQRMISupport(args []string) error {
 
 	hostsCSV := fs.String("hosts", "", "Comma-separated execution hosts to update (required)")
 	hostValue := fs.String("host-value", "", "Single backend name assigned to each host's qpu complex value (required)")
+	enableSlots := fs.Bool("enable-qpu-slots", false, "Create qpu_slots and optionally seed host capacity")
+	slotsName := fs.String("qpu-slots-name", defaultSlotsResourceName, "QPU slots complex name")
+	slotsCapacity := fs.Int("qpu-slots-capacity", 1, "QPU slots capacity to set on each host; 0 clears host capacity")
+	slotsScope := fs.String("qpu-slots-scope", defaultSlotsScope, "QPU slots capacity scope: host or global")
 
 	queue := fs.String("queue", "", "Cluster queue name (required)")
 	prolog := fs.String("prolog", "", "Queue prolog path, use NONE to disable")
@@ -152,14 +171,51 @@ func runSetupQRMISupport(args []string) error {
 		return fmt.Errorf("create qconf client: %w", err)
 	}
 
-	if err := ensureResourceDefault(qc, hosts, resolvedHostValue); err != nil {
+	opts, err := resourceOptionsFromFlags(
+		*enableSlots,
+		*slotsName,
+		*slotsCapacity,
+		*slotsScope,
+	)
+	if err != nil {
+		return err
+	}
+	if err := ensureResourceDefault(qc, hosts, resolvedHostValue, opts); err != nil {
 		return err
 	}
 	return configureQueueHooksDefault(qc, strings.TrimSpace(*queue), strings.TrimSpace(*prolog), strings.TrimSpace(*epilog))
 }
 
-func ensureResourceDefault(qc qconf.QConf, hosts []string, resolvedHostValue string) error {
-	changed, err := ensureComplexEntry(qc)
+type resourceOptions struct {
+	enableSlots   bool
+	slotsName     string
+	slotsCapacity int
+	slotsScope    string
+}
+
+func resourceOptionsFromFlags(
+	enableSlots bool,
+	slotsName string,
+	slotsCapacity int,
+	slotsScope string,
+) (resourceOptions, error) {
+	opts := resourceOptions{
+		enableSlots:   enableSlots,
+		slotsName:     strings.TrimSpace(slotsName),
+		slotsCapacity: slotsCapacity,
+		slotsScope:    strings.ToLower(strings.TrimSpace(slotsScope)),
+	}
+	if opts.enableSlots && (opts.slotsName == "" || opts.slotsCapacity < 0) {
+		return opts, errors.New("--qpu-slots-name cannot be empty and --qpu-slots-capacity cannot be negative")
+	}
+	if opts.enableSlots && opts.slotsScope != "host" && opts.slotsScope != "global" {
+		return opts, errors.New("--qpu-slots-scope must be host or global")
+	}
+	return opts, nil
+}
+
+func ensureResourceDefault(qc qconf.QConf, hosts []string, resolvedHostValue string, opts resourceOptions) error {
+	changed, err := ensureComplexEntry(qc, qpuComplexEntry())
 	if err != nil {
 		return err
 	}
@@ -167,6 +223,22 @@ func ensureResourceDefault(qc qconf.QConf, hosts []string, resolvedHostValue str
 		fmt.Printf("ensured complex entry %q\n", defaultResourceName)
 	} else {
 		fmt.Printf("complex entry %q already matches requested settings\n", defaultResourceName)
+	}
+
+	if opts.enableSlots {
+		if _, err := ensureComplexEntry(qc, qpuSlotsComplexEntry(opts.slotsName)); err != nil {
+			return err
+		}
+		fmt.Printf("ensured complex entry %q\n", opts.slotsName)
+	}
+	if opts.enableSlots && opts.slotsScope == "global" {
+		if opts.slotsCapacity > 0 {
+			if err := setExecHostResource(qc, "global", opts.slotsName, fmt.Sprint(opts.slotsCapacity)); err != nil {
+				return err
+			}
+		} else if err := clearExecHostResource(qc, "global", opts.slotsName); err != nil {
+			return err
+		}
 	}
 
 	if len(hosts) == 0 {
@@ -178,6 +250,15 @@ func ensureResourceDefault(qc qconf.QConf, hosts []string, resolvedHostValue str
 		if err := setExecHostResource(qc, host, defaultResourceName, resolvedHostValue); err != nil {
 			return err
 		}
+		if opts.enableSlots && opts.slotsScope == "host" {
+			if opts.slotsCapacity > 0 {
+				if err := setExecHostResource(qc, host, opts.slotsName, fmt.Sprint(opts.slotsCapacity)); err != nil {
+					return err
+				}
+			} else if err := clearExecHostResource(qc, host, opts.slotsName); err != nil {
+				return err
+			}
+		}
 		fmt.Printf("set %s=%s on exechost %s\n", defaultResourceName, resolvedHostValue, host)
 	}
 	return nil
@@ -187,35 +268,17 @@ func ensureResourceDefault(qc qconf.QConf, hosts []string, resolvedHostValue str
 // the complex entry when it drifts from the expected model.
 func ensureComplexEntry(
 	qc qconf.QConf,
+	desired qconf.ComplexEntryConfig,
 ) (bool, error) {
-	// The adapter enforces a single model for scheduler-side qpu resources:
-	// string values with equality matching.
-	desired := qconf.ComplexEntryConfig{
-		Name:        defaultResourceName,
-		Shortcut:    defaultResourceName,
-		Type:        qconf.ResourceTypeString,
-		Relop:       "==",
-		Requestable: "YES",
-		Consumable:  qconf.ConsumableNO,
-		Default:     "NONE",
-		Urgency:     1000,
-	}
-
-	current, err := qc.ShowComplexEntry(defaultResourceName)
+	current, err := qc.ShowComplexEntry(desired.Name)
 	if err != nil {
 		if addErr := qc.AddComplexEntry(desired); addErr != nil {
-			return false, fmt.Errorf("add complex entry %q: %w (original show error: %v)", defaultResourceName, addErr, err)
+			return false, fmt.Errorf("add complex entry %q: %w (original show error: %v)", desired.Name, addErr, err)
 		}
 		return true, nil
 	}
 
-	if current.Shortcut == desired.Shortcut &&
-		current.Type == desired.Type &&
-		current.Relop == desired.Relop &&
-		strings.EqualFold(current.Requestable, desired.Requestable) &&
-		strings.EqualFold(current.Consumable, desired.Consumable) &&
-		current.Default == desired.Default &&
-		current.Urgency == desired.Urgency {
+	if complexEntryMatches(current, desired) {
 		return false, nil
 	}
 
@@ -227,10 +290,46 @@ func ensureComplexEntry(
 	current.Default = desired.Default
 	current.Urgency = desired.Urgency
 
-	if err := qc.ModifyComplexEntry(defaultResourceName, current); err != nil {
-		return false, fmt.Errorf("modify complex entry %q: %w", defaultResourceName, err)
+	if err := qc.ModifyComplexEntry(desired.Name, current); err != nil {
+		return false, fmt.Errorf("modify complex entry %q: %w", desired.Name, err)
 	}
 	return true, nil
+}
+
+func qpuComplexEntry() qconf.ComplexEntryConfig {
+	return qconf.ComplexEntryConfig{
+		Name:        defaultResourceName,
+		Shortcut:    defaultResourceName,
+		Type:        qconf.ResourceTypeString,
+		Relop:       "==",
+		Requestable: "YES",
+		Consumable:  qconf.ConsumableNO,
+		Default:     "NONE",
+		Urgency:     1000,
+	}
+}
+
+func qpuSlotsComplexEntry(name string) qconf.ComplexEntryConfig {
+	return qconf.ComplexEntryConfig{
+		Name:        name,
+		Shortcut:    name,
+		Type:        qconf.ResourceTypeInt,
+		Relop:       "<=",
+		Requestable: "YES",
+		Consumable:  qconf.ConsumableJOB,
+		Default:     "0",
+		Urgency:     0,
+	}
+}
+
+func complexEntryMatches(current, desired qconf.ComplexEntryConfig) bool {
+	return current.Shortcut == desired.Shortcut &&
+		current.Type == desired.Type &&
+		current.Relop == desired.Relop &&
+		strings.EqualFold(current.Requestable, desired.Requestable) &&
+		strings.EqualFold(current.Consumable, desired.Consumable) &&
+		current.Default == desired.Default &&
+		current.Urgency == desired.Urgency
 }
 
 func setExecHostResource(qc qconf.QConf, host, resourceName, resourceValue string) error {
@@ -246,6 +345,22 @@ func setExecHostResource(qc qconf.QConf, host, resourceName, resourceValue strin
 	}
 	hostCfg.Name = host
 	hostCfg.ComplexValues[resourceName] = resourceValue
+	if err := qc.ModifyExecHost(host, hostCfg); err != nil {
+		return fmt.Errorf("modify exechost %q: %w", host, err)
+	}
+	return nil
+}
+
+func clearExecHostResource(qc qconf.QConf, host, resourceName string) error {
+	hostCfg, err := qc.ShowExecHost(host)
+	if err != nil {
+		return fmt.Errorf("show exechost %q: %w", host, err)
+	}
+	if _, ok := hostCfg.ComplexValues[resourceName]; !ok {
+		return nil
+	}
+	hostCfg.Name = host
+	delete(hostCfg.ComplexValues, resourceName)
 	if err := qc.ModifyExecHost(host, hostCfg); err != nil {
 		return fmt.Errorf("modify exechost %q: %w", host, err)
 	}

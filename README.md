@@ -177,6 +177,7 @@ The key operational model is:
 - Scheduler resource: `qpu` as `STRING` with relop `==`
 - Consumable policy: `qpu` is configured as `NO` (backend selector only)
 - Host assignment: one backend name per host (for example `qpu=EMU_FREE`)
+- Optional capacity resource: `qpu_slots` as `INT`, `<=`, `Consumable=JOB`
 - Job request: `-l qpu=<backend>` (for example `-l qpu=EMU_FREE`)
 
 ### Admin Quick Checklist
