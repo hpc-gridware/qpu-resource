@@ -1,0 +1,10 @@
+load_sensor:
+  enabled: true
+  scope: global
+  resource_name: qpu_ready
+  provider: static
+  timeout_seconds: 1
+
+static:
+  ready: false
+  state_file: /shared/gridware-adapter/ocs-qpu-ready.state

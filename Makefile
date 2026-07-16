@@ -24,6 +24,7 @@ help:
 	@echo "  test               Run all Go tests (stub builds, no QRMI required)"
 	@echo "  vet                Run go vet over the module"
 	@echo "  build-adapter      Build gridware-adapter binary via Docker"
+	@echo "  build-load-sensor  Build optional OCS Load Sensor binary via Docker"
 	@echo "  build-go-hooks     Build Go OCS prolog/epilog hooks via Docker"
 	@echo "                     (clones QRMI from upstream and links libqrmi.so)"
 	@echo ""
@@ -47,6 +48,17 @@ build-adapter:
 	  -w /work \
 	  $(ADAPTER_IMAGE) /bin/sh -lc \
 	  'export PATH=/usr/local/go/bin:$$PATH && go build -buildvcs=false -o $(ADAPTER_OUT)/adapter ./src/cmd/gridware-adapter'
+
+.PHONY: build-load-sensor
+build-load-sensor:
+	mkdir -p $(ADAPTER_OUT)
+	docker run --rm --user $(shell id -u):$(shell id -g) \
+	  -e GOCACHE=/tmp/go-build \
+	  -e GOPATH=/tmp/go \
+	  -v "$(CURDIR)":/work \
+	  -w /work \
+	  $(ADAPTER_IMAGE) /bin/sh -lc \
+	  'export PATH=/usr/local/go/bin:$$PATH && go build -buildvcs=false -o $(ADAPTER_OUT)/qrmi-ocs-load-sensor ./src/cmd/qrmi-ocs-load-sensor'
 
 .PHONY: build-go-hooks
 build-go-hooks:
