@@ -8,6 +8,8 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 
 	qconf "github.com/hpc-gridware/go-clusterscheduler/pkg/qconf/v9.0"
@@ -18,6 +20,7 @@ const defaultResourceName = "qpu"
 const defaultReadyResourceName = "qpu_ready"
 const defaultSlotsResourceName = "qpu_slots"
 const defaultSlotsScope = "host"
+const defaultQRMIConfigPath = "/etc/qrmi/qrmi_config.json"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -124,6 +127,8 @@ func runEnsureResource(args []string) error {
 func runSetupQRMISupport(args []string) error {
 	fs := flag.NewFlagSet("setup-qrmi-support", flag.ContinueOnError)
 	qconfPath := fs.String("qconf", "qconf", "Path to qconf executable")
+	qstatPath := fs.String("qstat", "qstat", "Path to qstat executable used by the prolog")
+	qrmiConfig := fs.String("qrmi-config", defaultQRMIConfigPath, "Administrator-managed QRMI configuration path")
 	dryRun := fs.Bool("dry-run", false, "Print qconf operations without changing scheduler state")
 
 	hostsCSV := fs.String("hosts", "", "Comma-separated execution hosts to update (required)")
@@ -200,7 +205,16 @@ func runSetupQRMISupport(args []string) error {
 	if err := ensureResourceDefault(qc, hosts, resolvedHostValue, opts); err != nil {
 		return err
 	}
-	return configureQueueHooksDefault(qc, strings.TrimSpace(*queue), strings.TrimSpace(*prolog), strings.TrimSpace(*epilog))
+	hookOpts, err := queueHookOptionsFromFlags(
+		*qrmiConfig,
+		defaultResourceName,
+		opts.slotsName,
+		*qstatPath,
+	)
+	if err != nil {
+		return err
+	}
+	return configureQueueHooksDefault(qc, strings.TrimSpace(*queue), strings.TrimSpace(*prolog), strings.TrimSpace(*epilog), hookOpts)
 }
 
 type resourceOptions struct {
@@ -451,6 +465,10 @@ func configureHostLoadSensor(qc qconf.QConf, host, loadSensorPath string) error 
 func runConfigureQueueHooks(args []string) error {
 	fs := flag.NewFlagSet("configure-queue-hooks", flag.ContinueOnError)
 	qconfPath := fs.String("qconf", "qconf", "Path to qconf executable")
+	qstatPath := fs.String("qstat", "qstat", "Path to qstat executable used by the prolog")
+	qrmiConfig := fs.String("qrmi-config", defaultQRMIConfigPath, "Administrator-managed QRMI configuration path")
+	resourceName := fs.String("qpu-resource-name", defaultResourceName, "QPU backend complex name")
+	slotsResourceName := fs.String("qpu-slots-name", defaultSlotsResourceName, "QPU slots complex name")
 	dryRun := fs.Bool("dry-run", false, "Print qconf operations without changing scheduler state")
 
 	queue := fs.String("queue", "", "Cluster queue name (required)")
@@ -490,11 +508,48 @@ func runConfigureQueueHooks(args []string) error {
 		return fmt.Errorf("create qconf client: %w", err)
 	}
 
-	return configureQueueHooksDefault(qc, *queue, *prolog, *epilog)
+	hookOpts, err := queueHookOptionsFromFlags(
+		*qrmiConfig,
+		*resourceName,
+		*slotsResourceName,
+		*qstatPath,
+	)
+	if err != nil {
+		return err
+	}
+	return configureQueueHooksDefault(qc, *queue, *prolog, *epilog, hookOpts)
 }
 
-func configureQueueHooksDefault(qc qconf.QConf, queue, prolog, epilog string) error {
-	if err := configureQueueHookPaths(qc, queue, prolog, epilog); err != nil {
+type queueHookOptions struct {
+	configPath        string
+	resourceName      string
+	slotsResourceName string
+	qstatPath         string
+}
+
+func queueHookOptionsFromFlags(configPath, resourceName, slotsResourceName, qstatPath string) (queueHookOptions, error) {
+	resolvedQstat, err := exec.LookPath(strings.TrimSpace(qstatPath))
+	if err != nil {
+		return queueHookOptions{}, fmt.Errorf("resolve qstat executable: %w", err)
+	}
+	resolvedQstat, err = filepath.Abs(resolvedQstat)
+	if err != nil {
+		return queueHookOptions{}, fmt.Errorf("resolve absolute qstat path: %w", err)
+	}
+	opts := queueHookOptions{
+		configPath:        strings.TrimSpace(configPath),
+		resourceName:      strings.TrimSpace(resourceName),
+		slotsResourceName: strings.TrimSpace(slotsResourceName),
+		qstatPath:         resolvedQstat,
+	}
+	if opts.configPath == "" || opts.resourceName == "" {
+		return queueHookOptions{}, errors.New("QRMI config and QPU resource must not be empty")
+	}
+	return opts, nil
+}
+
+func configureQueueHooksDefault(qc qconf.QConf, queue, prolog, epilog string, opts queueHookOptions) error {
+	if err := configureQueueHookPaths(qc, queue, prolog, epilog, opts); err != nil {
 		return err
 	}
 	if err := configureGlobalQRMIReporting(qc); err != nil {
@@ -503,8 +558,15 @@ func configureQueueHooksDefault(qc qconf.QConf, queue, prolog, epilog string) er
 	return nil
 }
 
-func configureQueueHookPaths(qc qconf.QConf, queue, prolog, epilog string) error {
-	prologCommand, err := qrmiQueueHookCommand(prolog, true)
+func configureQueueHookPaths(qc qconf.QConf, queue, prolog, epilog string, opts queueHookOptions) error {
+	prologCommand, err := qrmiQueueHookCommand(
+		prolog,
+		true,
+		"--config="+opts.configPath,
+		"--resource="+opts.resourceName,
+		"--slots-resource="+opts.slotsResourceName,
+		"--qstat="+opts.qstatPath,
+	)
 	if err != nil {
 		return fmt.Errorf("invalid prolog: %w", err)
 	}
@@ -527,7 +589,7 @@ func configureQueueHookPaths(qc qconf.QConf, queue, prolog, epilog string) error
 	return nil
 }
 
-func qrmiQueueHookCommand(path string, passJobOwner bool) (string, error) {
+func qrmiQueueHookCommand(path string, passJobOwner bool, args ...string) (string, error) {
 	command := strings.TrimSpace(path)
 	if command == "NONE" {
 		return command, nil
@@ -539,6 +601,12 @@ func qrmiQueueHookCommand(path string, passJobOwner bool) (string, error) {
 		return "", errors.New("hook path must not contain a user prefix")
 	}
 	command = "root@" + command
+	for _, arg := range args {
+		if arg == "" || strings.ContainsAny(arg, " \t\r\n") {
+			return "", errors.New("hook arguments must be non-empty and contain no whitespace")
+		}
+		command += " " + arg
+	}
 	if passJobOwner {
 		command += " $job_owner"
 	}

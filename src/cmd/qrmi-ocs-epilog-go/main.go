@@ -42,7 +42,11 @@ func main() {
 // example because the job was rejected before it ran).
 func run() int {
 	qrmi.SetLogCallback(log.QRMILog)
-	metaPath := qrmiocs.ResolveMetadataPath()
+	metaPath, err := qrmiocs.ResolveMetadataPath()
+	if err != nil {
+		log.Error("resolve metadata path: %v", err)
+		return 1
+	}
 	rec, readErr := qrmiocs.ReadStrictSingle(metaPath)
 	if readErr != nil && errors.Is(readErr, fs.ErrNotExist) {
 		log.Info("no metadata file found at %s; skipping release", metaPath)

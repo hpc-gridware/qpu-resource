@@ -20,7 +20,14 @@
 
 #define DEFAULT_QRMI_CONFIG_PATH "/etc/qrmi/qrmi_config.json"
 #define DEFAULT_RESOURCE_NAME "qpu"
+#define DEFAULT_SLOTS_RESOURCE_NAME "qpu_slots"
 #define METADATA_FILENAME "qrmi_ocs_acquired.tsv"
+
+#if defined(QRMI_HAS_LOG_CALLBACK) ||                                                \
+    (defined(QRMI_VERSION) && defined(QRMI_VERSION_NUMERIC) &&                       \
+     QRMI_VERSION >= QRMI_VERSION_NUMERIC(0, 20, 0))
+#define QRMI_OCS_HAS_LOG_CALLBACK 1
+#endif
 
 typedef struct {
     char *name;
@@ -72,11 +79,13 @@ static int scheduler_job_uid(const char *job_owner, uid_t *uid) {
 }
 
 static int set_runtime_env(FILE *job_env, const char *key, const char *value, bool export_to_job);
-static int read_job_requested_resource(const char *resource_name, char **value_out);
+static int read_job_requested_resource(const char *resource_name,
+                                       const char *qstat_path,
+                                       char **value_out);
 
-static int export_scheduler_slots(FILE *job_env) {
-    const char *resource_name = getenv("QRMI_OCS_SLOTS_RESOURCE_NAME");
-    char grant_env[256];
+static int export_scheduler_slots(FILE *job_env,
+                                  const char *resource_name,
+                                  const char *qstat_path) {
     const char *raw;
     char *requested = NULL;
     char *end;
@@ -84,28 +93,11 @@ static int export_scheduler_slots(FILE *job_env) {
     int slots;
     char slots_buf[32];
 
-    if (resource_name == NULL || *resource_name == '\0') {
-        resource_name = "qpu_slots";
+    int requested_rc = read_job_requested_resource(resource_name, qstat_path, &requested);
+    if (requested_rc != 0) {
+        return requested_rc < 0 ? -1 : 0;
     }
-    if (snprintf(grant_env, sizeof(grant_env), "SGE_HGR_%s", resource_name) >=
-        (int)sizeof(grant_env)) {
-        return -1;
-    }
-    raw = getenv(grant_env);
-    if (raw == NULL || *raw == '\0') {
-        if (snprintf(grant_env, sizeof(grant_env), "SGE_SGR_%s", resource_name) >=
-            (int)sizeof(grant_env)) {
-            return -1;
-        }
-        raw = getenv(grant_env);
-    }
-    if (raw == NULL || *raw == '\0') {
-        int requested_rc = read_job_requested_resource(resource_name, &requested);
-        if (requested_rc != 0) {
-            return requested_rc < 0 ? -1 : 0;
-        }
-        raw = requested;
-    }
+    raw = requested;
     errno = 0;
     value = strtod(raw, &end);
     while (isspace((unsigned char)*end)) {
@@ -137,7 +129,7 @@ static int export_scheduler_slots(FILE *job_env) {
     return result;
 }
 
-#if defined(QRMI_HAS_LOG_CALLBACK)
+#if defined(QRMI_OCS_HAS_LOG_CALLBACK)
 static void log_qrmi_line(const char *level, const char *target, const char *message) {
     const char *log_level = level == NULL ? "INFO" : level;
     const char *log_target = target == NULL ? "qrmi" : target;
@@ -228,11 +220,10 @@ static char *resource_from_list(char *list, const char *resource_name) {
     return NULL;
 }
 
-static int read_job_requested_resource(const char *resource_name, char **value_out) {
+static int read_job_requested_resource(const char *resource_name,
+                                       const char *qstat_path,
+                                       char **value_out) {
     const char *job_id = getenv("JOB_ID");
-    const char *configured_path = getenv("QRMI_OCS_QSTAT_PATH");
-    const char *binary_path = getenv("SGE_BINARY_PATH");
-    char qstat_path[PATH_MAX];
     int output_pipe[2];
     pid_t pid;
     FILE *output;
@@ -243,21 +234,8 @@ static int read_job_requested_resource(const char *resource_name, char **value_o
     int status;
 
     *value_out = NULL;
-    if (job_id == NULL || *job_id == '\0') {
+    if (job_id == NULL || *job_id == '\0' || qstat_path == NULL || *qstat_path == '\0') {
         return 1;
-    }
-    if (configured_path != NULL && *configured_path != '\0') {
-        if (snprintf(qstat_path, sizeof(qstat_path), "%s", configured_path) >=
-            (int)sizeof(qstat_path)) {
-            return -1;
-        }
-    } else if (binary_path != NULL && *binary_path != '\0') {
-        if (snprintf(qstat_path, sizeof(qstat_path), "%s/qstat", binary_path) >=
-            (int)sizeof(qstat_path)) {
-            return -1;
-        }
-    } else if (snprintf(qstat_path, sizeof(qstat_path), "qstat") >= (int)sizeof(qstat_path)) {
-        return -1;
     }
 
     if (pipe(output_pipe) != 0) {
@@ -276,7 +254,7 @@ static int read_job_requested_resource(const char *resource_name, char **value_o
         }
         close(output_pipe[1]);
         if (strchr(qstat_path, '/') == NULL) {
-            execlp(qstat_path, qstat_path, "-j", job_id, (char *)NULL);
+        execl(qstat_path, qstat_path, "-j", job_id, (char *)NULL);
         } else {
             execl(qstat_path, qstat_path, "-j", job_id, (char *)NULL);
         }
@@ -452,15 +430,7 @@ static int parse_granted_backend(const char *granted, char **backend_name) {
 }
 
 static int resolve_job_env_path(char *path, size_t size) {
-    const char *job_env = getenv("SGE_JOB_ENV");
     const char *spool;
-
-    if (job_env != NULL && *job_env != '\0') {
-        if (snprintf(path, size, "%s", job_env) >= (int)size) {
-            return -1;
-        }
-        return 0;
-    }
 
     spool = getenv("SGE_JOB_SPOOL_DIR");
     if (spool == NULL || *spool == '\0') {
@@ -473,38 +443,13 @@ static int resolve_job_env_path(char *path, size_t size) {
     return 0;
 }
 
-/* resolve_metadata_path chooses where prolog writes acquisition records for
- * epilog release. Priority: explicit env override, job spool dir, then /tmp.
- */
+/* resolve_metadata_path keeps credentials in the scheduler-owned job spool. */
 static int resolve_metadata_path(char *path, size_t size) {
-    const char *forced = getenv("QRMI_OCS_METADATA_PATH");
     const char *spool;
-    const char *job_id;
-
-    if (forced != NULL && *forced != '\0') {
-        if (snprintf(path, size, "%s", forced) >= (int)size) {
-            return -1;
-        }
-        return 0;
-    }
 
     spool = getenv("SGE_JOB_SPOOL_DIR");
-    if (spool != NULL && *spool != '\0') {
-        if (snprintf(path, size, "%s/%s", spool, METADATA_FILENAME) >= (int)size) {
-            return -1;
-        }
-        return 0;
-    }
-
-    job_id = getenv("JOB_ID");
-    if (job_id != NULL && *job_id != '\0') {
-        if (snprintf(path, size, "/tmp/qrmi_ocs_%s.tsv", job_id) >= (int)size) {
-            return -1;
-        }
-        return 0;
-    }
-
-    if (snprintf(path, size, "/tmp/qrmi_ocs_acquired.tsv") >= (int)size) {
+    if (spool == NULL || *spool == '\0' ||
+        snprintf(path, size, "%s/%s", spool, METADATA_FILENAME) >= (int)size) {
         return -1;
     }
     return 0;
@@ -644,9 +589,11 @@ static void free_acquired_resources(AcquiredResource *resources, size_t count) {
 }
 
 int main(int argc, char **argv) {
-    const char *config_path;
-    const char *resource_name;
-    char hard_grant_env[256];
+    const char *config_path = DEFAULT_QRMI_CONFIG_PATH;
+    const char *resource_name = DEFAULT_RESOURCE_NAME;
+    const char *slots_resource_name = DEFAULT_SLOTS_RESOURCE_NAME;
+    const char *qstat_path = NULL;
+    const char *job_owner = NULL;
     const char *granted = NULL;
     char *requested_grant = NULL;
     char *backend_name = NULL;
@@ -668,51 +615,38 @@ int main(int argc, char **argv) {
     char uid_buf[32];
     uid_t job_uid;
     const char *job_id;
+    const char *task_id;
+    char scheduler_job_id[512];
 
     size_t i;
-    if (argc > 2) {
-        log_line(stderr, "ERROR", "expected at most one job-owner argument");
-        return 1;
-    }
-    config_path = getenv("QRMI_OCS_CONFIG_PATH");
-    if (config_path == NULL || *config_path == '\0') {
-        config_path = DEFAULT_QRMI_CONFIG_PATH;
-    }
-
-    resource_name = getenv("QRMI_OCS_RESOURCE_NAME");
-    if (resource_name == NULL || *resource_name == '\0') {
-        resource_name = DEFAULT_RESOURCE_NAME;
-    }
-
-    if (snprintf(hard_grant_env, sizeof(hard_grant_env), "SGE_HGR_%s", resource_name) >=
-        (int)sizeof(hard_grant_env)) {
-        log_line(stderr, "ERROR", "resource name too long: %s", resource_name);
-        return 1;
-    }
-
-    granted = getenv(hard_grant_env);
-    if (granted == NULL || *granted == '\0') {
-        if (snprintf(hard_grant_env, sizeof(hard_grant_env), "SGE_SGR_%s", resource_name) >=
-            (int)sizeof(hard_grant_env)) {
-                log_line(stderr, "ERROR", "resource name too long: %s", resource_name);
-                return 1;
-            }
-            granted = getenv(hard_grant_env);
-    }
-
-    if (granted == NULL || *granted == '\0') {
-        int requested_rc = read_job_requested_resource(resource_name, &requested_grant);
-        if (requested_rc == 0) {
-            granted = requested_grant;
+    for (i = 1; i < (size_t)argc; i++) {
+        if (strncmp(argv[i], "--config=", 9) == 0) {
+            config_path = argv[i] + 9;
+        } else if (strncmp(argv[i], "--resource=", 11) == 0) {
+            resource_name = argv[i] + 11;
+        } else if (strncmp(argv[i], "--slots-resource=", 17) == 0) {
+            slots_resource_name = argv[i] + 17;
+        } else if (strncmp(argv[i], "--qstat=", 8) == 0) {
+            qstat_path = argv[i] + 8;
+        } else if (argv[i][0] == '-' || job_owner != NULL) {
+            log_line(stderr, "ERROR", "invalid prolog argument: %s", argv[i]);
+            return 1;
+        } else {
+            job_owner = argv[i];
         }
     }
+    if (*config_path == '\0' || *resource_name == '\0' ||
+        qstat_path == NULL || qstat_path[0] != '/') {
+        log_line(stderr, "ERROR", "config, resource, and absolute qstat path are required");
+        return 1;
+    }
+
+    if (read_job_requested_resource(resource_name, qstat_path, &requested_grant) == 0) {
+        granted = requested_grant;
+    }
 
     if (granted == NULL || *granted == '\0') {
-        log_line(stderr,
-                 "ERROR",
-                 "no granted value found in SGE_HGR_%s, SGE_SGR_%s, or scheduler job state",
-                 resource_name,
-                 resource_name);
+        log_line(stderr, "ERROR", "resource %s not found in scheduler job state", resource_name);
         return 1;
     }
 
@@ -738,7 +672,7 @@ int main(int argc, char **argv) {
     } else {
         log_line(stderr,
                  "ERROR",
-                 "unable to resolve job environment file path (SGE_JOB_ENV or SGE_JOB_SPOOL_DIR) ");
+                 "unable to resolve scheduler job environment path");
         free(backend_name);
         return 1;
     }
@@ -748,23 +682,37 @@ int main(int argc, char **argv) {
         set_plugin_error(job_env_file, "failed to set RUST_LOG");
         goto fail;
     }
-    if (scheduler_job_uid(argc == 2 ? argv[1] : NULL, &job_uid) != 0 ||
+    if (scheduler_job_uid(job_owner, &job_uid) != 0 ||
         snprintf(uid_buf, sizeof(uid_buf), "%u", (unsigned int)job_uid) >= (int)sizeof(uid_buf) ||
         set_runtime_env(job_env_file, "QRMI_JOB_UID", uid_buf, true) != 0) {
         set_plugin_error(job_env_file, "failed to export scheduler job owner uid");
         goto fail;
     }
     job_id = getenv("JOB_ID");
-    if (job_id == NULL || *job_id == '\0' ||
-        set_runtime_env(job_env_file, "QRMI_JOB_ID", job_id, true) != 0) {
+    task_id = getenv("SGE_TASK_ID");
+    if (job_id == NULL || *job_id == '\0') {
         set_plugin_error(job_env_file, "failed to export scheduler job id");
         goto fail;
     }
-    if (export_scheduler_slots(job_env_file) != 0) {
+    if (task_id != NULL && *task_id != '\0' && strcmp(task_id, "undefined") != 0 &&
+        strcmp(task_id, "0") != 0) {
+        if (snprintf(scheduler_job_id, sizeof(scheduler_job_id), "%s.%s", job_id, task_id) >=
+            (int)sizeof(scheduler_job_id)) {
+            set_plugin_error(job_env_file, "scheduler job id is too long");
+            goto fail;
+        }
+        job_id = scheduler_job_id;
+    }
+    if (set_runtime_env(job_env_file, "QRMI_JOB_ID", job_id, true) != 0) {
+        set_plugin_error(job_env_file, "failed to export scheduler job id");
+        goto fail;
+    }
+    if (*slots_resource_name != '\0' &&
+        export_scheduler_slots(job_env_file, slots_resource_name, qstat_path) != 0) {
         set_plugin_error(job_env_file, "failed to export scheduler QPU slots");
         goto fail;
     }
-#if defined(QRMI_HAS_LOG_CALLBACK)
+#if defined(QRMI_OCS_HAS_LOG_CALLBACK)
     qrmi_log_callback_set(log_qrmi_line);
 #endif
 
@@ -975,7 +923,7 @@ int main(int argc, char **argv) {
         goto fail;
     }
 
-    int metadata_fd = open(metadata_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    int metadata_fd = open(metadata_path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0600);
     if (metadata_fd >= 0) {
         if (fchmod(metadata_fd, 0600) != 0) {
             int chmod_errno = errno;
@@ -1013,11 +961,6 @@ int main(int argc, char **argv) {
     }
     fclose(metadata_file);
     metadata_file = NULL;
-
-    if (set_runtime_env(job_env_file, "QRMI_OCS_METADATA_PATH", metadata_path, true) != 0) {
-        set_plugin_error(job_env_file, "failed to export metadata path");
-        goto fail;
-    }
 
     log_line(stdout,
              "INFO",

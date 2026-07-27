@@ -16,13 +16,16 @@ import (
 	"bufio"
 	"bytes"
 	"errors"
+	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/hpc-gridware/qpu-resource/src/internal/qrmi"
@@ -40,15 +43,12 @@ var log = qrmiocs.NewLogger(component)
 var errRequestedResourceNotFound = errors.New("requested resource not found")
 
 func main() {
-	if len(os.Args) > 2 {
-		log.Error("expected at most one job-owner argument")
+	cfg, jobOwner, err := parseHookArgs(os.Args[1:])
+	if err != nil {
+		log.Error("%v", err)
 		os.Exit(1)
 	}
-	jobOwner := ""
-	if len(os.Args) == 2 {
-		jobOwner = os.Args[1]
-	}
-	if err := runForOwner(jobOwner); err != nil {
+	if err := runWithConfig(jobOwner, cfg); err != nil {
 		log.Error("%v", err)
 		os.Exit(1)
 	}
@@ -59,9 +59,11 @@ func run() error {
 }
 
 func runForOwner(jobOwner string) error {
-	cfg := loadHookConfig()
+	return runWithConfig(jobOwner, defaultHookConfig())
+}
 
-	granted, err := readGranted(cfg.ResourceName)
+func runWithConfig(jobOwner string, cfg hookConfig) error {
+	granted, err := readGranted(cfg.ResourceName, cfg.QstatPath)
 	if err != nil {
 		return err
 	}
@@ -96,7 +98,7 @@ func runForOwner(jobOwner string) error {
 	if err := exportBackendEnv(jobEnv, backend, def.Environments()); err != nil {
 		return reportError(jobEnv, fmt.Errorf("apply backend env for %s: %w", backend, err))
 	}
-	if err := exportSchedulerJobEnv(jobEnv, cfg.SlotsResourceName, jobOwner); err != nil {
+	if err := exportSchedulerJobEnv(jobEnv, cfg, jobOwner); err != nil {
 		return reportError(jobEnv, fmt.Errorf("export scheduler job env: %w", err))
 	}
 
@@ -135,14 +137,14 @@ func runForOwner(jobOwner string) error {
 		return reportError(jobEnv, fmt.Errorf("export runtime env: %w", err))
 	}
 
-	metaPath := qrmiocs.ResolveMetadataPath()
+	metaPath, err := qrmiocs.ResolveMetadataPath()
+	if err != nil {
+		_ = resource.Release(token)
+		return reportError(jobEnv, fmt.Errorf("resolve metadata path: %w", err))
+	}
 	if err := qrmiocs.WriteAtomic(metaPath, []qrmiocs.Record{rec}); err != nil {
 		_ = resource.Release(token)
 		return reportError(jobEnv, fmt.Errorf("write metadata %s: %w", metaPath, err))
-	}
-	if err := jobEnv.Set("QRMI_OCS_METADATA_PATH", metaPath); err != nil {
-		_ = resource.Release(token)
-		return reportError(jobEnv, fmt.Errorf("export metadata path: %w", err))
 	}
 
 	if err := jobEnv.Set(qrmiocs.PrologStatusKey, "success"); err != nil {
@@ -154,60 +156,64 @@ func runForOwner(jobOwner string) error {
 	return nil
 }
 
-// hookConfig captures the small set of env-driven parameters that change
-// the prolog's behavior. Keeping them in one struct makes the run loop
-// easier to read.
 type hookConfig struct {
 	ConfigPath        string
 	ResourceName      string
 	SlotsResourceName string
+	QstatPath         string
 }
 
-func loadHookConfig() hookConfig {
-	cfg := hookConfig{
-		ConfigPath:        os.Getenv("QRMI_OCS_CONFIG_PATH"),
-		ResourceName:      os.Getenv("QRMI_OCS_RESOURCE_NAME"),
-		SlotsResourceName: os.Getenv("QRMI_OCS_SLOTS_RESOURCE_NAME"),
+func defaultHookConfig() hookConfig {
+	return hookConfig{
+		ConfigPath:        defaultConfigPath,
+		ResourceName:      defaultResourceName,
+		SlotsResourceName: defaultSlotsResourceName,
 	}
-	if cfg.ConfigPath == "" {
-		cfg.ConfigPath = defaultConfigPath
-	}
-	if cfg.ResourceName == "" {
-		cfg.ResourceName = defaultResourceName
-	}
-	if cfg.SlotsResourceName == "" {
-		cfg.SlotsResourceName = defaultSlotsResourceName
-	}
-	return cfg
 }
 
-// readGranted returns the value of the scheduler's granted-resource env
-// variable. It tries SGE_HGR_<resource> first (hard request), then
-// SGE_SGR_<resource> (soft request), and then the dispatched job's qstat
-// resource list. The selected host's complex_values is the final fallback
-// for non-consumable host selectors.
-func readGranted(resourceName string) (string, error) {
-	if v := os.Getenv("SGE_HGR_" + resourceName); v != "" {
-		return v, nil
+func parseHookArgs(args []string) (hookConfig, string, error) {
+	cfg := defaultHookConfig()
+	fs := flag.NewFlagSet(component, flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.StringVar(&cfg.ConfigPath, "config", cfg.ConfigPath, "")
+	fs.StringVar(&cfg.ResourceName, "resource", cfg.ResourceName, "")
+	fs.StringVar(&cfg.SlotsResourceName, "slots-resource", cfg.SlotsResourceName, "")
+	fs.StringVar(&cfg.QstatPath, "qstat", cfg.QstatPath, "")
+	if err := fs.Parse(args); err != nil {
+		return hookConfig{}, "", err
 	}
-	if v := os.Getenv("SGE_SGR_" + resourceName); v != "" {
-		return v, nil
+	if fs.NArg() > 1 {
+		return hookConfig{}, "", errors.New("expected at most one job-owner argument")
 	}
-	if v, err := readJobRequestedResource(resourceName); err == nil {
-		return v, nil
+	if cfg.ConfigPath == "" || cfg.ResourceName == "" {
+		return hookConfig{}, "", errors.New("config and resource must not be empty")
 	}
-	if v, err := readHostComplexValue(resourceName); err == nil && v != "" {
-		return v, nil
+	jobOwner := ""
+	if fs.NArg() == 1 {
+		jobOwner = fs.Arg(0)
 	}
-	return "", fmt.Errorf("no granted value found in SGE_HGR_%s or SGE_SGR_%s", resourceName, resourceName)
+	return cfg, jobOwner, nil
 }
 
-func readJobRequestedResource(resourceName string) (string, error) {
+// readGranted resolves the request from scheduler state rather than trusting
+// similarly named variables submitted with the job.
+func readGranted(resourceName, qstatPath string) (string, error) {
+	return readJobRequestedResource(resourceName, qstatPath)
+}
+
+func readJobRequestedResource(resourceName, qstatPath string) (string, error) {
 	jobID := os.Getenv("JOB_ID")
 	if jobID == "" {
 		return "", errRequestedResourceNotFound
 	}
-	out, err := exec.Command(qstatPath(), "-j", jobID).Output()
+	if qstatPath == "" {
+		var err error
+		qstatPath, err = trustedExecutable("qstat")
+		if err != nil {
+			return "", err
+		}
+	}
+	out, err := exec.Command(qstatPath, "-j", jobID).Output()
 	if err != nil {
 		return "", fmt.Errorf("read scheduler state for job %s: %w", jobID, err)
 	}
@@ -251,71 +257,24 @@ func parseResourceListField(out []byte, field, resourceName string) (string, boo
 	return "", false
 }
 
-func readHostComplexValue(resourceName string) (string, error) {
-	host := os.Getenv("HOST")
-	if host == "" {
-		host = os.Getenv("HOSTNAME")
-	}
-	if host == "" {
-		return "", fmt.Errorf("HOST is not set")
-	}
-	out, err := exec.Command(qconfPath(), "-se", host).Output()
+func trustedExecutable(name string) (string, error) {
+	path, err := exec.LookPath(name)
 	if err != nil {
 		return "", err
 	}
-	return parseHostComplexValue(out, resourceName)
-}
-
-func qconfPath() string {
-	if p := os.Getenv("QRMI_OCS_QCONF_PATH"); p != "" {
-		return p
-	}
-	if dir := os.Getenv("SGE_BINARY_PATH"); dir != "" {
-		return filepath.Join(dir, "qconf")
-	}
-	return "qconf"
-}
-
-func qstatPath() string {
-	if p := os.Getenv("QRMI_OCS_QSTAT_PATH"); p != "" {
-		return p
-	}
-	if dir := os.Getenv("SGE_BINARY_PATH"); dir != "" {
-		return filepath.Join(dir, "qstat")
-	}
-	return "qstat"
-}
-
-func parseHostComplexValue(out []byte, resourceName string) (string, error) {
-	scanner := bufio.NewScanner(bytes.NewReader(out))
-	var values strings.Builder
-	collecting := false
-	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.HasPrefix(line, "complex_values") {
-			collecting = true
-			values.WriteString(strings.TrimSpace(strings.TrimPrefix(line, "complex_values")))
-			continue
-		}
-		if collecting && (strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t")) {
-			values.WriteByte(',')
-			values.WriteString(strings.TrimSpace(line))
-			continue
-		}
-		if collecting {
-			break
-		}
-	}
-	if err := scanner.Err(); err != nil {
+	path, err = filepath.EvalSymlinks(path)
+	if err != nil {
 		return "", err
 	}
-	for _, item := range strings.Split(strings.ReplaceAll(values.String(), "\\", ""), ",") {
-		key, value, ok := strings.Cut(strings.TrimSpace(item), "=")
-		if ok && strings.TrimSpace(key) == resourceName {
-			return strings.TrimSpace(value), nil
-		}
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", err
 	}
-	return "", fmt.Errorf("%s not found in host complex_values", resourceName)
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat.Uid != 0 || !info.Mode().IsRegular() || info.Mode().Perm()&0o022 != 0 {
+		return "", fmt.Errorf("scheduler executable %s is not root-owned and non-writable", path)
+	}
+	return path, nil
 }
 
 // exportBackendEnv applies the backend-prefixed environment variables
@@ -338,17 +297,17 @@ func exportBackendEnv(je *qrmiocs.JobEnv, backend string, env []qrmi.EnvVar) err
 	return nil
 }
 
-func exportSchedulerJobEnv(je *qrmiocs.JobEnv, slotsResourceName, jobOwner string) error {
+func exportSchedulerJobEnv(je *qrmiocs.JobEnv, cfg hookConfig, jobOwner string) error {
 	uid, err := schedulerJobUID(jobOwner)
 	if err != nil {
 		return err
 	}
 	pairs := [][2]string{
 		{"QRMI_JOB_UID", strconv.Itoa(uid)},
-		{"QRMI_JOB_ID", os.Getenv("JOB_ID")},
+		{"QRMI_JOB_ID", schedulerJobID()},
 	}
-	if slotsResourceName != "" {
-		if slots, ok, err := readGrantedSlots(slotsResourceName); err != nil {
+	if cfg.SlotsResourceName != "" {
+		if slots, ok, err := readGrantedSlots(cfg.SlotsResourceName, cfg.QstatPath); err != nil {
 			return err
 		} else if ok {
 			pairs = append(pairs, [2]string{"QRMI_JOB_QPU_SLOTS", strconv.Itoa(slots)})
@@ -363,6 +322,15 @@ func exportSchedulerJobEnv(je *qrmiocs.JobEnv, slotsResourceName, jobOwner strin
 		}
 	}
 	return nil
+}
+
+func schedulerJobID() string {
+	jobID := os.Getenv("JOB_ID")
+	taskID := os.Getenv("SGE_TASK_ID")
+	if taskID != "" && taskID != "undefined" && taskID != "0" {
+		return jobID + "." + taskID
+	}
+	return jobID
 }
 
 func schedulerJobUID(jobOwner string) (int, error) {
@@ -380,20 +348,13 @@ func schedulerJobUID(jobOwner string) (int, error) {
 	return uid, nil
 }
 
-func readGrantedSlots(resourceName string) (int, bool, error) {
-	raw := os.Getenv("SGE_HGR_" + resourceName)
-	if raw == "" {
-		raw = os.Getenv("SGE_SGR_" + resourceName)
+func readGrantedSlots(resourceName, qstatPath string) (int, bool, error) {
+	raw, err := readJobRequestedResource(resourceName, qstatPath)
+	if errors.Is(err, errRequestedResourceNotFound) {
+		return 0, false, nil
 	}
-	if raw == "" {
-		var err error
-		raw, err = readJobRequestedResource(resourceName)
-		if errors.Is(err, errRequestedResourceNotFound) {
-			return 0, false, nil
-		}
-		if err != nil {
-			return 0, false, err
-		}
+	if err != nil {
+		return 0, false, err
 	}
 	slots, err := parseGrantedSlots(raw)
 	if err != nil {

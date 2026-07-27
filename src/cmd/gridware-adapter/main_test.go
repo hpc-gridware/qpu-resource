@@ -220,23 +220,18 @@ int main(void) {
   if (value == NULL) { return 2; }
   if (strcmp(value, "from_config") != 0) { return 3; }
   if (scheduler_job_uid(NULL, &uid) != 0 || uid != getuid()) { return 4; }
-  if (setenv("SGE_HGR_qpu_slots", "5.000000", 1) != 0) { return 5; }
-  if (export_scheduler_slots(job_env) != 0) { return 6; }
-  value = getenv("QRMI_JOB_QPU_SLOTS");
   fclose(job_env);
-  if (value == NULL || strcmp(value, "5") != 0) { return 7; }
   qstat_fd = mkstemp(qstat_template);
   if (qstat_fd < 0) { return 8; }
   qstat = fdopen(qstat_fd, "w");
   if (qstat == NULL) { close(qstat_fd); return 9; }
   if (fprintf(qstat, "#!/bin/sh\nprintf '%%%%s\\n' 'hard_resource_list: qpu=test_backend,qpu_slots=3'\n") < 0) { return 10; }
   if (fclose(qstat) != 0 || chmod(qstat_template, 0700) != 0) { return 11; }
-  if (unsetenv("SGE_HGR_qpu_slots") != 0 || unsetenv("SGE_SGR_qpu_slots") != 0) { return 12; }
-  if (setenv("QRMI_OCS_QSTAT_PATH", qstat_template, 1) != 0 || setenv("JOB_ID", "42", 1) != 0) { return 13; }
-  if (read_job_requested_resource("qpu", &requested) != 0 || strcmp(requested, "test_backend") != 0) { return 14; }
+  if (setenv("JOB_ID", "42", 1) != 0) { return 13; }
+  if (read_job_requested_resource("qpu", qstat_template, &requested) != 0 || strcmp(requested, "test_backend") != 0) { return 14; }
   free(requested);
   job_env = tmpfile();
-  if (job_env == NULL || export_scheduler_slots(job_env) != 0) { return 15; }
+  if (job_env == NULL || export_scheduler_slots(job_env, "qpu_slots", qstat_template) != 0) { return 15; }
   fclose(job_env);
   value = getenv("QRMI_JOB_QPU_SLOTS");
   unlink(qstat_template);
@@ -281,8 +276,9 @@ int main(void) {
   char bad_type_line[] = "res\t1x\ttok\t123\n";
   char bad_epoch_line[] = "res\t1\ttok\t123x\n";
   char good_line[] = "res\t1\ttok\t123\n";
-  char metadata_template[] = "/tmp/qrmi_epilog_meta_XXXXXX";
-  char env_template[] = "/tmp/qrmi_epilog_env_XXXXXX";
+  char spool_template[] = "/tmp/qrmi_epilog_XXXXXX";
+  char metadata_path[PATH_MAX];
+  char env_path[PATH_MAX];
   int metadata_fd;
   int env_fd;
   FILE *metadata;
@@ -297,25 +293,27 @@ int main(void) {
   if (parse_record_line(good_line, &rec) != 0) { return 12; }
   free_record(&rec);
 
-  metadata_fd = mkstemp(metadata_template);
+  if (mkdtemp(spool_template) == NULL) { return 19; }
+  if (snprintf(metadata_path, sizeof(metadata_path), "%%s/%%s", spool_template, METADATA_FILENAME) >= (int)sizeof(metadata_path)) { return 20; }
+  if (snprintf(env_path, sizeof(env_path), "%%s/environment", spool_template) >= (int)sizeof(env_path)) { return 20; }
+  metadata_fd = open(metadata_path, O_WRONLY | O_CREAT | O_EXCL, 0600);
   if (metadata_fd < 0) { return 20; }
   metadata = fdopen(metadata_fd, "w");
   if (metadata == NULL) { return 21; }
   if (fprintf(metadata, "res\t1\ttok1\t1\nres\t1\ttok2\t2\n") < 0) { fclose(metadata); return 22; }
   fclose(metadata);
 
-  env_fd = mkstemp(env_template);
+  env_fd = open(env_path, O_WRONLY | O_CREAT | O_EXCL, 0600);
   if (env_fd < 0) { return 23; }
   close(env_fd);
 
-  if (setenv("QRMI_OCS_METADATA_PATH", metadata_template, 1) != 0) { return 24; }
-  if (setenv("SGE_JOB_ENV", env_template, 1) != 0) { return 25; }
+  if (setenv("SGE_JOB_SPOOL_DIR", spool_template, 1) != 0) { return 25; }
 
   rc = qrmi_ocs_epilog_main();
   if (rc == 0) { return 30; }
   if (g_release_calls != 0) { return 31; }
 
-  env_file = fopen(env_template, "r");
+  env_file = fopen(env_path, "r");
   if (env_file == NULL) { return 32; }
   env_len = fread(env_buf, 1, sizeof(env_buf) - 1, env_file);
   fclose(env_file);
@@ -323,7 +321,9 @@ int main(void) {
   if (strstr(env_buf, "qrmi_release_failed=1") == NULL) { return 33; }
   if (strstr(env_buf, "qrmi_epilog_status=error") == NULL) { return 34; }
 
-  unlink(env_template);
+  unlink(metadata_path);
+  unlink(env_path);
+  rmdir(spool_template);
   return 0;
 }
 `, cIncludePath(epilogMain)),

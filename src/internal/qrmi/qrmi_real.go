@@ -9,7 +9,9 @@ package qrmi
 // #include <stdlib.h>
 // #include <stdbool.h>
 // #include "qrmi.h"
-// #if defined(QRMI_HAS_LOG_CALLBACK)
+// #if defined(QRMI_HAS_LOG_CALLBACK) || \
+//     (defined(QRMI_VERSION) && defined(QRMI_VERSION_NUMERIC) && \
+//      QRMI_VERSION >= QRMI_VERSION_NUMERIC(0, 20, 0))
 // extern void qrmiGoLogCallback(char *level, char *target, char *message);
 // static inline void qrmi_set_go_log_callback(void) {
 //     qrmi_log_callback_set((QrmiLogCallback)qrmiGoLogCallback);

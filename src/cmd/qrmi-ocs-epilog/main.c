@@ -19,6 +19,12 @@
 
 #define METADATA_FILENAME "qrmi_ocs_acquired.tsv"
 
+#if defined(QRMI_HAS_LOG_CALLBACK) ||                                                \
+    (defined(QRMI_VERSION) && defined(QRMI_VERSION_NUMERIC) &&                       \
+     QRMI_VERSION >= QRMI_VERSION_NUMERIC(0, 20, 0))
+#define QRMI_OCS_HAS_LOG_CALLBACK 1
+#endif
+
 typedef struct {
     char *name;
     QrmiResourceType type;
@@ -53,7 +59,7 @@ static FILE *open_append_private(const char *path) {
     return file;
 }
 
-#if defined(QRMI_HAS_LOG_CALLBACK)
+#if defined(QRMI_OCS_HAS_LOG_CALLBACK)
 static void log_qrmi_line(const char *level, const char *target, const char *message) {
     const char *log_level = level == NULL ? "INFO" : level;
     const char *log_target = target == NULL ? "qrmi" : target;
@@ -81,49 +87,18 @@ static char *dup_text(const char *src) {
 }
 
 static int resolve_metadata_path(char *path, size_t size) {
-    const char *forced = getenv("QRMI_OCS_METADATA_PATH");
     const char *spool;
-    const char *job_id;
-
-    if (forced != NULL && *forced != '\0') {
-        if (snprintf(path, size, "%s", forced) >= (int)size) {
-            return -1;
-        }
-        return 0;
-    }
 
     spool = getenv("SGE_JOB_SPOOL_DIR");
-    if (spool != NULL && *spool != '\0') {
-        if (snprintf(path, size, "%s/%s", spool, METADATA_FILENAME) >= (int)size) {
-            return -1;
-        }
-        return 0;
-    }
-
-    job_id = getenv("JOB_ID");
-    if (job_id != NULL && *job_id != '\0') {
-        if (snprintf(path, size, "/tmp/qrmi_ocs_%s.tsv", job_id) >= (int)size) {
-            return -1;
-        }
-        return 0;
-    }
-
-    if (snprintf(path, size, "/tmp/qrmi_ocs_acquired.tsv") >= (int)size) {
+    if (spool == NULL || *spool == '\0' ||
+        snprintf(path, size, "%s/%s", spool, METADATA_FILENAME) >= (int)size) {
         return -1;
     }
     return 0;
 }
 
 static int resolve_job_env_path(char *path, size_t size) {
-    const char *job_env = getenv("SGE_JOB_ENV");
     const char *spool;
-
-    if (job_env != NULL && *job_env != '\0') {
-        if (snprintf(path, size, "%s", job_env) >= (int)size) {
-            return -1;
-        }
-        return 0;
-    }
 
     spool = getenv("SGE_JOB_SPOOL_DIR");
     if (spool == NULL || *spool == '\0') {
@@ -307,7 +282,7 @@ int main(void) {
     long elapsed = 0;
     char numbuf[32];
 
-#if defined(QRMI_HAS_LOG_CALLBACK)
+#if defined(QRMI_OCS_HAS_LOG_CALLBACK)
     qrmi_log_callback_set(log_qrmi_line);
 #endif
 

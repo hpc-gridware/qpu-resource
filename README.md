@@ -209,6 +209,10 @@ Engine's `$job_owner` value to the prolog. This lets the hooks update the
 root-owned job spool and call administrator-only QRMI acquisition endpoints
 while the acquired session remains owned by the submitting user. Hook binaries
 and their parent directories must therefore be writable only by administrators.
+The adapter stores the QRMI config path, absolute `qstat` path, and resource names
+in the administrator-owned queue prolog command. The
+root hook does not accept those values or resource grants from the submitted
+job environment.
 
 ```bash
 ./adapter setup-qrmi-support \
@@ -343,7 +347,8 @@ cp /shared/qrmi/libqrmi-0.20.0/libqrmi.so /shared/gridware-adapter/bin/
 Hook behavior:
 
 - Prolog reads granted scheduler resource, resolves one backend name, acquires QRMI token, and writes runtime variables into the job environment.
-- Prolog reads `SGE_HGR_<resource>` or `SGE_SGR_<resource>` when available and otherwise reads the dispatched job's resource list from `qstat -j`.
+- Prolog reads the dispatched job's resource list from the administrator-configured `qstat -j` command.
+- Acquisition metadata is stored only in the scheduler-owned job spool.
 - Epilog reads acquisition metadata and releases tokens.
 - Epilog expects exactly one metadata record; multiple records are treated as an error.
 - Prolog publishes runtime `qrmi_*` values in the job environment.

@@ -22,8 +22,7 @@ var _ = Describe("JobEnv", func() {
 	BeforeEach(func() {
 		dir := GinkgoT().TempDir()
 		path = filepath.Join(dir, "environment")
-		GinkgoT().Setenv("SGE_JOB_ENV", path)
-		GinkgoT().Setenv("SGE_JOB_SPOOL_DIR", "")
+		GinkgoT().Setenv("SGE_JOB_SPOOL_DIR", dir)
 		Expect(os.WriteFile(path, nil, 0o644)).To(Succeed())
 
 		var err error
@@ -75,8 +74,7 @@ var _ = Describe("JobEnv.ApplyDefaultRustLog", func() {
 	BeforeEach(func() {
 		dir := GinkgoT().TempDir()
 		path = filepath.Join(dir, "environment")
-		GinkgoT().Setenv("SGE_JOB_ENV", path)
-		GinkgoT().Setenv("SGE_JOB_SPOOL_DIR", "")
+		GinkgoT().Setenv("SGE_JOB_SPOOL_DIR", dir)
 		GinkgoT().Setenv("RUST_LOG", "")
 		GinkgoT().Setenv("QRMI_OCS_LOG_LEVEL", "")
 		GinkgoT().Setenv("SGE_DEBUG_LEVEL", "")
