@@ -172,7 +172,7 @@ QrmiResourceDef *qrmi_config_resource_def_get(QrmiConfig *config, const char *re
 }
 const char *qrmi_config_resource_type_to_str(QrmiResourceType type) { (void)type; return "pasqal-cloud"; }
 QrmiReturnCode qrmi_config_resource_def_free(QrmiResourceDef *ptr) { (void)ptr; return QRMI_RETURN_CODE_SUCCESS; }
-const char *qrmi_get_last_error(void) { return ""; }
+char *qrmi_get_last_error(void) { return ""; }
 QrmiReturnCode qrmi_log_callback_set(QrmiLogCallback callback) { (void)callback; return QRMI_RETURN_CODE_SUCCESS; }
 QrmiQuantumResource *qrmi_resource_new(const char *resource_id, QrmiResourceType resource_type) {
   (void)resource_id;
@@ -255,7 +255,7 @@ func TestEpilogStrictMetadataBehavior(t *testing.T) {
 struct QrmiQuantumResource { int dummy; };
 static int g_release_calls = 0;
 
-const char *qrmi_get_last_error(void) { return ""; }
+char *qrmi_get_last_error(void) { return ""; }
 QrmiReturnCode qrmi_log_callback_set(QrmiLogCallback callback) { (void)callback; return QRMI_RETURN_CODE_SUCCESS; }
 QrmiQuantumResource *qrmi_resource_new(const char *resource_id, QrmiResourceType resource_type) {
   (void)resource_id;
