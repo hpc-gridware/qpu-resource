@@ -12,9 +12,13 @@ import (
 func TestWardenProviderAccessibleStates(t *testing.T) {
 	for _, ready := range []bool{true, false} {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			fmt.Fprintf(w, `{"is_accessible":%t,"message":"ok","qpu_slots_available":5}`, ready)
+			if r.URL.Path == "/qpu-slots" {
+				fmt.Fprint(w, `{"qpu_slots_available":5}`)
+				return
+			}
+			fmt.Fprintf(w, `{"is_accessible":%t,"message":"ok"}`, ready)
 		}))
-		status, err := WardenProvider{BaseURL: server.URL, Endpoint: "/accessible", TLSVerify: true}.Status(context.Background())
+		status, err := testWardenProvider(server.URL, true).Status(context.Background())
 		server.Close()
 		if err != nil {
 			t.Fatalf("Status returned error: %v", err)
@@ -37,7 +41,7 @@ func TestWardenProviderFailsClosedOnHTTPError(t *testing.T) {
 		http.Error(w, "nope", http.StatusInternalServerError)
 	}))
 	defer server.Close()
-	status, err := WardenProvider{BaseURL: server.URL, Endpoint: "/accessible", TLSVerify: true}.Status(context.Background())
+	status, err := testWardenProvider(server.URL, false).Status(context.Background())
 	if err == nil {
 		t.Fatal("expected HTTP error")
 	}
@@ -51,7 +55,7 @@ func TestWardenProviderFailsClosedOnMalformedJSON(t *testing.T) {
 		fmt.Fprint(w, `{"message":"missing"}`)
 	}))
 	defer server.Close()
-	status, err := WardenProvider{BaseURL: server.URL, Endpoint: "/accessible", TLSVerify: true}.Status(context.Background())
+	status, err := testWardenProvider(server.URL, false).Status(context.Background())
 	if err == nil {
 		t.Fatal("expected malformed response error")
 	}
@@ -65,7 +69,7 @@ func TestWardenProviderFailsClosedOnTrailingJSON(t *testing.T) {
 		fmt.Fprint(w, `{"is_accessible":true}{"extra":true}`)
 	}))
 	defer server.Close()
-	status, err := WardenProvider{BaseURL: server.URL, Endpoint: "/accessible", TLSVerify: true}.Status(context.Background())
+	status, err := testWardenProvider(server.URL, false).Status(context.Background())
 	if err == nil || status.Ready {
 		t.Fatalf("expected trailing JSON to fail closed: status=%+v err=%v", status, err)
 	}
@@ -73,10 +77,14 @@ func TestWardenProviderFailsClosedOnTrailingJSON(t *testing.T) {
 
 func TestWardenProviderFailsClosedOnNegativeSlots(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, `{"is_accessible":true,"qpu_slots_available":-1}`)
+		if r.URL.Path == "/qpu-slots" {
+			fmt.Fprint(w, `{"qpu_slots_available":-1}`)
+			return
+		}
+		fmt.Fprint(w, `{"is_accessible":true}`)
 	}))
 	defer server.Close()
-	status, err := WardenProvider{BaseURL: server.URL, Endpoint: "/accessible", TLSVerify: true}.Status(context.Background())
+	status, err := testWardenProvider(server.URL, true).Status(context.Background())
 	if err == nil || status.Ready {
 		t.Fatalf("expected negative slots to fail closed: status=%+v err=%v", status, err)
 	}
@@ -88,12 +96,40 @@ func TestWardenProviderFailsClosedOnTimeout(t *testing.T) {
 		fmt.Fprint(w, `{"is_accessible":true}`)
 	}))
 	defer server.Close()
-	provider := WardenProvider{BaseURL: server.URL, Endpoint: "/accessible", TLSVerify: true}.WithTimeout(10 * time.Millisecond)
+	provider := testWardenProvider(server.URL, false).WithTimeout(10 * time.Millisecond)
 	status, err := provider.Status(context.Background())
 	if err == nil {
 		t.Fatal("expected timeout error")
 	}
 	if status.Ready {
 		t.Fatal("expected fail-closed unavailable state")
+	}
+}
+
+func TestWardenProviderSkipsCapacityWithoutSlotsResource(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		fmt.Fprint(w, `{"is_accessible":true}`)
+	}))
+	defer server.Close()
+
+	status, err := testWardenProvider(server.URL, false).Status(context.Background())
+
+	if err != nil || !status.Ready || status.SlotsAvailable != nil {
+		t.Fatalf("unexpected readiness-only result: status=%+v err=%v", status, err)
+	}
+	if requests != 1 {
+		t.Fatalf("request count mismatch: got=%d want=1", requests)
+	}
+}
+
+func testWardenProvider(baseURL string, readSlots bool) WardenProvider {
+	return WardenProvider{
+		BaseURL:       baseURL,
+		Endpoint:      "/accessible",
+		SlotsEndpoint: "/qpu-slots",
+		ReadSlots:     readSlots,
+		TLSVerify:     true,
 	}
 }

@@ -5,7 +5,16 @@ Copyright 2026 Pasqal and its contributors.
 This runbook is for admins validating and operating QRMI integration on
 Gridware/Open Cluster Scheduler (OCS), with Pasqal Cloud only.
 
-The same core scheduler commands are available in `demo/qrmi/quickinstall.sh`.
+For the resource model and job lifecycle, start with the
+[project overview](../README.md#architecture). This runbook covers the
+`EMU_FREE` cloud path; dynamic Pasqal Local readiness and capacity are covered
+in the [Load Sensor guide](../load_sensor.md). The pending Pasqal Local
+upstream changes listed there do not affect this released-QRMI cloud path.
+
+The same core scheduler commands are available in
+[`demo/qrmi/quickinstall.sh`](../demo/qrmi/quickinstall.sh). The Grid Engine
+design implemented here is described in the 2026 paper
+[*Examining QRMI as a Unified Interface for Quantum-HPC Integration*](https://arxiv.org/abs/2607.19591).
 
 ## 0) Admin Preconditions
 
@@ -184,7 +193,8 @@ docker exec ocs-master /bin/bash -lc 'chown root:root /tmp/qrmi-hooks/qrmi-ocs-p
 
 ### 2.4) Install `qrmi_config.json` for `EMU_FREE`
 
-Write the runtime config on all OCS nodes:
+The Go hooks read `/etc/qrmi/qrmi_config.json` by default. Write the runtime
+config on all OCS nodes:
 
 ```bash
 for c in ocs-master ocs-worker1 ocs-worker2; do
@@ -205,6 +215,9 @@ for c in ocs-master ocs-worker1 ocs-worker2; do
 JSON"
 done
 ```
+
+For the legacy C hooks, write the same file to
+`/etc/slurm/qrmi_config.json` instead.
 
 ### 2.5) Setup QRMI support (automatic)
 

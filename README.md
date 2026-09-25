@@ -1,84 +1,133 @@
-# QPU-resource
+# QRMI Adapter for Grid Engine
 
-Pasqal-OCS integration
+**Schedule vendor-agnostic quantum resources through familiar `qsub` jobs.**
 
-Copyright 2026 Pasqal, HPC Gridware GmbH and its contributors.
+[![arXiv](https://img.shields.io/badge/arXiv-2607.19591-b31b1b.svg)](https://arxiv.org/abs/2607.19591)
+[![Go](https://img.shields.io/badge/Go-1.24-00ADD8.svg)](https://go.dev/)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-Go CLI for QRMI setup on Gridware Cluster Scheduler (GCS) and
-Open Cluster Scheduler (OCS).
+[Paper](https://arxiv.org/abs/2607.19591) ·
+[Admin runbook](docs/quickinstall-testing.md) ·
+[Load Sensor guide](load_sensor.md) ·
+[QRMI](https://github.com/qiskit-community/qrmi)
 
-In this workspace, the documented end-to-end path is OCS local validation with
-Pasqal Cloud (`EMU_FREE`).
+This repository connects the
+[Quantum Resource Management Interface (QRMI)](https://github.com/qiskit-community/qrmi)
+to the Grid Engine family of schedulers, including
+[Open Cluster Scheduler (OCS)](https://github.com/hpc-gridware/clusterscheduler)
+and Gridware Cluster Scheduler (GCS). QPUs and emulators become schedulable
+resources alongside CPUs and GPUs, while QRMI keeps jobs independent of
+provider-specific APIs.
 
-## Who This Is For
+This is the completed Grid Engine integration examined in the 2026 paper
+[*Examining QRMI as a Unified Interface for Quantum-HPC Integration*](https://arxiv.org/abs/2607.19591).
+It covers the scheduler, lifecycle, configuration, dynamic state, and
+accounting behavior described there.
 
-- End users:
-  - Submit jobs through OCS with `qsub -l qpu=EMU_FREE`.
-  - Start at: `docs/quickinstall-testing.md` (sections 2 and 3).
-- Admins:
-  - Configure Gridware resource state and queue hooks.
-  - Start at:
-    - `docs/quickinstall-testing.md` (primary admin runbook)
-    - `setup-qrmi-support` section below
-- Developers:
-  - Work on adapter CLI and queue hook code.
-  - Start at:
-    - `src/cmd/gridware-adapter/main.go`
-    - `src/cmd/qrmi-ocs-prolog/main.c` (legacy C hook)
-    - `src/cmd/qrmi-ocs-epilog/main.c` (legacy C hook)
-    - `src/cmd/qrmi-ocs-prolog-go/main.go` (Go port)
-    - `src/cmd/qrmi-ocs-epilog-go/main.go` (Go port)
+## Implementation Status
 
-## Repository Layout
+**The Grid Engine/OCS scope claimed in the paper is implemented in this
+repository.**
 
-```text
-qpu-resource
-├── LICENSE
-├── Makefile
-├── README.md
-├── consumable-issue.md
-├── demo
-│   └── qrmi
-│       └── quickinstall.sh
-├── docs
-│   ├── plans/
-│   └── quickinstall-testing.md
-├── go.mod
-├── go.sum
-├── scripts
-│   └── Dockerfile.hooks
-├── src
-│   ├── cmd
-│   │   ├── gridware-adapter
-│   │   │   └── main.go
-│   │   ├── qrmi-ocs-epilog
-│   │   │   └── main.c
-│   │   ├── qrmi-ocs-epilog-go (Go port of the epilog hook)
-│   │   │   └── main.go
-│   │   ├── qrmi-ocs-prolog
-│   │   │   └── main.c
-│   │   └── qrmi-ocs-prolog-go (Go port of the prolog hook)
-│   │       └── main.go
-│   └── internal
-│       ├── qrmi          (cgo wrapper around libqrmi)
-│       └── qrmiocs       (scheduler-side plumbing, no cgo)
+| Paper capability | Implementation |
+| --- | --- |
+| Scheduler-native quantum resource selection and constraints | `qpu`, `qpu_slots`, and `qpu_ready` complexes configured by `gridware-adapter` |
+| Dynamic readiness and capacity | OCS Load Sensor with static and Pasqal Warden providers |
+| Lifecycle management | QRMI acquisition in the queue prolog and release in the epilog |
+| Provider-independent configuration | Logical resource lookup through `qrmi_config.json` |
+| Runtime state and accounting | Per-job spool metadata, environment variables, and `qrmi_*` fields exposed through `qacct` |
+
+The Pasqal Cloud `EMU_FREE` path is available with released QRMI versions. The
+Pasqal Local slot-capacity path is also implemented here, but currently depends
+on two pending upstream changes before it is available from released
+dependencies:
+
+- [QRMI #164: Add QPU slots to Pasqal local QRMI](https://github.com/qiskit-community/qrmi/pull/164)
+- [Warden #73: Add Warden-side features for QPU slots](https://github.com/pasqal-io/warden/pull/73)
+
+Until those changes are merged and released, use their matching
+`aw/qpu-slots` branches for Pasqal Local validation. Their pending status is an
+upstream release dependency, not unfinished Grid Engine adapter work.
+
+## Architecture
+
+![QRMI integration with Open Cluster Scheduler](docs/figs/qrmi-ocs-architecture.png)
+
+*The implemented OCS architecture. A job is admitted through scheduler-native
+complexes, acquires its quantum resource in the queue prolog, and releases it
+in the epilog. The Load Sensor feeds current readiness and capacity into
+scheduling decisions when dynamic state is enabled.*
+
+The integration follows three main ideas from the paper:
+
+- **Scheduler-native requests:** users select a quantum resource with ordinary
+  Grid Engine syntax instead of a provider-specific submission tool.
+- **Thin lifecycle hooks:** the prolog acquires through QRMI and the epilog
+  releases the resource and records usage.
+- **Provider separation:** scheduler configuration names logical resources;
+  `qrmi_config.json` owns provider resource types and runtime settings.
+
+### Resource model
+
+| Complex | Type and relation | Consumable | Purpose |
+| --- | --- | --- | --- |
+| `qpu` | `STRING ==` | No | Select one logical QRMI resource |
+| `qpu_slots` | `INT <=` | Per job | Request capacity from that resource |
+| `qpu_ready` | `INT <=` | No | Require dynamic availability reported by a Load Sensor |
+
+`qpu` is deliberately a selector, not a consumable. Grid Engine requires
+consumables to be numeric and use `<=`, so capacity belongs in a separate
+complex such as `qpu_slots`. See [the resource-model note](consumable-issue.md)
+for the scheduler constraints behind this design.
+
+Submit against a configured resource:
+
+```bash
+# Selection only
+qsub -l qpu=EMU_FREE job.sh
+
+# Selection plus dynamic readiness and capacity
+qsub -l qpu=PASQAL_FRESNEL,qpu_ready=1,qpu_slots=2 job.sh
 ```
 
-What is where:
+The second request is a conjunction: OCS dispatches it only when the host
+advertises `PASQAL_FRESNEL`, the backend is ready, and at least two QPU slots
+are available. Resource names are administrator-defined entries in
+`qrmi_config.json`; use the name deployed at your site.
 
-- `src/cmd/gridware-adapter/main.go`: adapter CLI (`setup-qrmi-support`, `ensure-resource`, `configure-queue-hooks`).
-- `src/cmd/qrmi-ocs-load-sensor/main.go`: optional OCS Load Sensor for dynamic QPU readiness.
-- `src/cmd/qrmi-ocs-prolog/main.c`: legacy OCS queue prolog hook (resource/env setup + acquire).
-- `src/cmd/qrmi-ocs-epilog/main.c`: legacy OCS queue epilog hook (release + accounting fields).
-- `src/cmd/qrmi-ocs-prolog-go/main.go`: Go port of the prolog hook (preferred for new deployments).
-- `src/cmd/qrmi-ocs-epilog-go/main.go`: Go port of the epilog hook (preferred for new deployments).
-- `src/internal/qrmiocs`: scheduler-side glue (env, paths, metadata TSV, RUST_LOG mapping). No cgo. Fully unit-tested.
-- `src/internal/qrmi`: cgo wrapper around `libqrmi.so`. Compiled only with `-tags qrmi`.
-- `scripts/Dockerfile.hooks`: multi-stage Docker build that produces the Go hook binaries plus `libqrmi.so`.
-- `Makefile`: `make build-go-hooks`, `make build-adapter`, `make test`, `make vet`.
-- `docs/quickinstall-testing.md`: admin runbook for quickinstall + validation.
-- `demo/qrmi/quickinstall.sh`: runnable smoke commands for quick checks.
-- `go.mod` and `go.sum`: Go module and dependency lock state.
+### Job lifecycle
+
+1. The user submits a normal `qsub` request for `qpu` and optional constraints.
+2. OCS evaluates the request against host complexes and Load Sensor values.
+3. The queue prolog resolves the granted name, checks accessibility, acquires
+   the QRMI resource, and publishes runtime metadata to the job environment.
+4. The user job talks to the selected backend through QRMI.
+5. The queue epilog releases the resource and writes `qrmi_*` usage fields for
+   `qacct` and accounting integrations.
+
+## Start Here
+
+| Audience | First step |
+| --- | --- |
+| Users | Submit the [smoke job](#end-user-quick-start-ocs), then follow the [Pasqal Cloud test](docs/quickinstall-testing.md#3-pasqal-cloud-pulser-test-on-ocs) |
+| Administrators | Follow the [quickinstall runbook](docs/quickinstall-testing.md) or use [`setup-qrmi-support`](#setup-qrmi-support-default) |
+| Developers | Build and test below, then start with the adapter and Go hook commands under `src/cmd/` |
+
+## Repository Map
+
+| Path | Role |
+| --- | --- |
+| `src/cmd/gridware-adapter` | Configures complexes, host mappings, queue hooks, Load Sensors, and reporting |
+| `src/cmd/qrmi-ocs-load-sensor` | Publishes dynamic QPU readiness and capacity |
+| `src/cmd/qrmi-ocs-prolog-go` / `qrmi-ocs-epilog-go` | Preferred Go lifecycle hooks |
+| `src/cmd/qrmi-ocs-prolog` / `qrmi-ocs-epilog` | Legacy C lifecycle hooks |
+| `src/internal/availability` | Static and Pasqal Warden availability providers |
+| `src/internal/qrmi` | cgo wrapper around `libqrmi.so` |
+| `src/internal/qrmiocs` | Scheduler environment, spool, metadata, and logging support |
+| `docs/quickinstall-testing.md` | OCS installation and Pasqal Cloud validation runbook |
+| `docs/figs` | Documentation figures, including the OCS architecture above |
+| `load_sensor.md` | Pasqal Local, Warden, and Load Sensor operations |
+| `demo/qrmi` | Runnable smoke and Load Sensor checks |
 
 ## Build
 
@@ -106,6 +155,11 @@ make build-go-hooks                    # builds against QRMI v0.20.0 by default
 make build-go-hooks QRMI_REF=main      # builds against QRMI main
 ```
 
+The standard Docker target builds the cloud-capable QRMI library. Pasqal Local
+also requires QRMI's `munge` feature and `libmunge`; follow the
+[Pasqal Local build notes](load_sensor.md#build-artifacts) and use the
+`aw/qpu-slots` QRMI branch until PR #164 is released.
+
 Outputs in `bin/go-hooks/`:
 
 - `qrmi-ocs-prolog`
@@ -118,25 +172,24 @@ any `LD_LIBRARY_PATH` mangling.
 
 ### Legacy C hooks
 
-The legacy C prolog/epilog under `src/cmd/qrmi-ocs-prolog/` and
-`src/cmd/qrmi-ocs-epilog/` are kept until the Go ports are validated in
-production. Build instructions for those are unchanged; see the
-`Build queue hooks` section below.
+The Go prolog and epilog are the current implementations. The legacy C hooks
+under `src/cmd/qrmi-ocs-prolog/` and `src/cmd/qrmi-ocs-epilog/` remain for
+compatibility and have the same external contract. See
+[Build queue hooks](#build-queue-hooks) for their build instructions.
 
 ### Tests
 
 ```bash
-make test    # runs Go unit tests; no QRMI required (uses stub build)
+make test    # runs Go tests and the legacy C harnesses
 make vet
 ```
 
-Two of the existing C-harness tests in `src/cmd/gridware-adapter`
-(`TestPrologApplyBackendEnvUsesConfiguredValue`,
-`TestEpilogStrictMetadataBehavior`) require a sibling `qrmi/` checkout
-at `${GOPATH}/src/github.com/hpc-gridware/qrmi` with the QRMI headers.
-Without it those two tests fail with `required path missing "qrmi"`;
-that is unrelated to the Go ports and matches the pre-existing
-behavior of the C hook tests.
+Two legacy C-harness tests in `src/cmd/gridware-adapter`
+(`TestPrologApplyBackendEnvUsesConfiguredValue` and
+`TestEpilogStrictMetadataBehavior`) compile against a sibling `qrmi/` checkout
+at `${GOPATH}/src/github.com/hpc-gridware/qrmi`. That checkout must exist and
+its headers must match the test harness; a missing checkout or a newer C API
+can fail those tests before the Go-native suite runs.
 
 ## End-User Quick Start (OCS)
 
@@ -260,6 +313,7 @@ load_sensor:
 warden:
   base_url: http://127.0.0.1:8006
   endpoint: /accessible
+  slots_endpoint: /qpu-slots
   tls_verify: true
 
 static:
@@ -268,11 +322,11 @@ static:
 ```
 
 The `static` provider either returns `static.ready` or reads `0`/`1` from
-`static.state_file`. It is a dummy readiness signal for paper/demo use and does
-not represent Pasqal Cloud queue availability. The `warden` provider polls
-`GET /accessible`, can report `qpu_slots_available` when Warden is configured
-with `qpu_slots_total`, and fails closed on timeouts, HTTP errors, or malformed
-responses.
+`static.state_file`. It provides deterministic state for scheduler validation
+without a live provider and does not represent Pasqal Cloud queue availability.
+The `warden` provider polls `GET /accessible` for readiness and, when a slots
+resource is configured, `GET /qpu-slots` for `qpu_slots_available`. It fails
+closed on timeouts, HTTP errors, or malformed responses.
 
 The Load Sensor is an early scheduler filter only. The OCS prolog still calls
 QRMI `IsAccessible` and `Acquire`, so a job can still be rejected at dispatch
@@ -394,7 +448,7 @@ gcc -Wall -Wextra -fsyntax-only -I./qrmi src/cmd/qrmi-ocs-prolog/main.c
 gcc -Wall -Wextra -fsyntax-only -I./qrmi src/cmd/qrmi-ocs-epilog/main.c
 ```
 
-- Run Go unit tests for the new hook plumbing without QRMI:
+- Run the Go hook tests without QRMI:
 
 ```bash
 make test
@@ -412,8 +466,10 @@ CGO_ENABLED=1 \
 
 ## Demo and Docs
 
-- Runnable quickinstall demo commands: `demo/qrmi/quickinstall.sh`
-- Full runbook: `docs/quickinstall-testing.md`
+- [Runnable quickinstall demo commands](demo/qrmi/quickinstall.sh)
+- [OCS and Pasqal Cloud admin runbook](docs/quickinstall-testing.md)
+- [Load Sensor and Pasqal Local guide](load_sensor.md)
+- [Grid Engine integration paper](https://arxiv.org/abs/2607.19591)
 
 ## Additional Notes
 
@@ -422,4 +478,4 @@ CGO_ENABLED=1 \
 
 ## License
 
-Apache License 2.0. See `LICENSE`.
+[Apache License 2.0](LICENSE).
