@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"testing"
 
 	qconf "github.com/hpc-gridware/go-clusterscheduler/pkg/qconf/v9.0"
@@ -376,5 +377,29 @@ func runCHarness(t *testing.T, qrmiInclude, source string) {
 	runOut, err := run.CombinedOutput()
 	if err != nil {
 		t.Fatalf("run harness failed: %v\n%s", err, string(runOut))
+	}
+}
+
+func TestWithLoadSensorReplacesEarlierInstalls(t *testing.T) {
+	cases := []struct {
+		current []string
+		want    []string
+	}{
+		{nil, []string{"/opt/qrmi/bin/qrmi-ocs-load-sensor"}},
+		{[]string{"NONE"}, []string{"/opt/qrmi/bin/qrmi-ocs-load-sensor"}},
+		{
+			[]string{"NONE", "/shared/old/qrmi-ocs-load-sensor", "/opt/site/gpu-sensor"},
+			[]string{"/opt/site/gpu-sensor", "/opt/qrmi/bin/qrmi-ocs-load-sensor"},
+		},
+		{
+			[]string{"/opt/qrmi/bin/qrmi-ocs-load-sensor"},
+			[]string{"/opt/qrmi/bin/qrmi-ocs-load-sensor"},
+		},
+	}
+	for _, tc := range cases {
+		got := withLoadSensor(tc.current, "/opt/qrmi/bin/qrmi-ocs-load-sensor")
+		if !slices.Equal(got, tc.want) {
+			t.Errorf("withLoadSensor(%q) = %q, want %q", tc.current, got, tc.want)
+		}
 	}
 }

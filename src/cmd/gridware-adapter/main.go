@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	qconf "github.com/hpc-gridware/go-clusterscheduler/pkg/qconf/v9.0"
@@ -450,16 +451,30 @@ func configureHostLoadSensor(qc qconf.QConf, host, loadSensorPath string) error 
 		return nil
 	}
 	hostCfg.Name = host
-	for _, current := range hostCfg.LoadSensors {
-		if current == loadSensorPath {
-			return nil
-		}
+	sensors := withLoadSensor(hostCfg.LoadSensors, loadSensorPath)
+	if slices.Equal(sensors, hostCfg.LoadSensors) {
+		return nil
 	}
-	hostCfg.LoadSensors = append(hostCfg.LoadSensors, loadSensorPath)
+	hostCfg.LoadSensors = sensors
 	if err := qc.ModifyHostConfiguration(host, hostCfg); err != nil {
 		return fmt.Errorf("modify host configuration %q: %w", host, err)
 	}
 	return nil
+}
+
+// withLoadSensor returns the host's load sensors with loadSensorPath
+// installed once. NONE placeholders and earlier installs of the same sensor
+// binary are replaced; other load sensors are kept.
+func withLoadSensor(current []string, loadSensorPath string) []string {
+	sensors := []string{}
+	for _, sensor := range current {
+		if strings.EqualFold(sensor, "NONE") ||
+			filepath.Base(sensor) == filepath.Base(loadSensorPath) {
+			continue
+		}
+		sensors = append(sensors, sensor)
+	}
+	return append(sensors, loadSensorPath)
 }
 
 func runConfigureQueueHooks(args []string) error {
