@@ -4,6 +4,18 @@ This adapter provides an optional Open Cluster Scheduler Load Sensor for QPU
 readiness. It is a scheduler-side admission filter only. QRMI acquisition and
 release remain in the queue prolog and epilog.
 
+It supplies the dynamic scheduling path shown in the
+[architecture overview](README.md#architecture) and described for Grid Engine
+in the 2026 paper
+[*Examining QRMI as a Unified Interface for Quantum-HPC Integration*](https://arxiv.org/abs/2607.19591).
+
+The OCS Load Sensor and lifecycle integration are complete in this repository.
+The full Pasqal Local slot-capacity path currently requires
+[QRMI #164](https://github.com/qiskit-community/qrmi/pull/164) and
+[Warden #73](https://github.com/pasqal-io/warden/pull/73). Until those changes
+are merged and released, use the `aw/qpu-slots` branch in both upstream
+projects. This does not affect the static Load Sensor or Pasqal Cloud paths.
+
 ## Resource Model
 
 Use three separate complexes:
@@ -85,7 +97,8 @@ while OCS waits for a failed Load Sensor process to be marked stale.
 
 ## Providers
 
-`static` is for demos and paper support only:
+`static` provides deterministic readiness for scheduler validation without a
+live provider:
 
 ```yaml
 load_sensor:
@@ -117,15 +130,15 @@ load_sensor:
 warden:
   base_url: http://127.0.0.1:4207
   endpoint: /accessible
+  slots_endpoint: /qpu-slots
   tls_verify: true
 ```
 
 `GET /accessible` maps `{"is_accessible": true}` to ready. `false` maps to
-unavailable. If Warden is configured with `qpu.qpu_slots_total`, the same
-response includes `qpu_slots_total`, `qpu_slots_used`, and
-`qpu_slots_available`; the Load Sensor reports `qpu_slots_available` as the
-dynamic `qpu_slots` value. Missing slot data fails closed to `0` only when
-`slots_resource_name` is set.
+unavailable. When `slots_resource_name` is set, the provider also reads
+`GET /qpu-slots` and reports `qpu_slots_available` as the dynamic `qpu_slots`
+value. Missing slot data fails closed to `0`. Warden must be configured with
+`qpu.qpu_slots_total` for this capacity endpoint.
 
 Warden remains scheduler-neutral; it does not configure OCS, run `qconf`, or
 start this Load Sensor.
@@ -176,6 +189,11 @@ For several global backends, configure distinct names such as
 This is the local setup needed in addition to the existing OCS and QRMI/Pasqal
 Cloud setup.
 
+The adapter-side implementation described below is complete. Build QRMI and
+Warden from their `aw/qpu-slots` branches until
+[QRMI #164](https://github.com/qiskit-community/qrmi/pull/164) and
+[Warden #73](https://github.com/pasqal-io/warden/pull/73) are released.
+
 ### Build Artifacts
 
 Build and install these on the OCS master/execution host:
@@ -220,12 +238,14 @@ contract is:
 
 ```text
 GET /accessible
+GET /qpu-slots
 POST /sessions
-DELETE /sessions/{id}
+DELETE /sessions with X-Warden-Session
 ```
 
-The Load Sensor only calls `GET /accessible`. The prolog and epilog use QRMI,
-which calls Warden session endpoints with MUNGE credentials.
+The Load Sensor calls both GET endpoints when dynamic slots are configured.
+The prolog and epilog use QRMI, which calls Warden session endpoints with MUNGE
+credentials.
 
 Example same-host endpoint:
 
@@ -237,12 +257,14 @@ Verify from the OCS execution host:
 
 ```sh
 curl http://127.0.0.1:4207/accessible
+curl http://127.0.0.1:4207/qpu-slots
 ```
 
 Expected response:
 
 ```json
-{"is_accessible":true,"message":"Warden ok.","qpu_slots_total":10,"qpu_slots_used":0,"qpu_slots_available":10}
+{"is_accessible":true,"message":"Warden ok."}
+{"qpu_slots_total":10,"qpu_slots_used":0,"qpu_slots_available":10}
 ```
 
 ### QRMI Config

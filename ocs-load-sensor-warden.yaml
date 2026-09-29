@@ -2,10 +2,12 @@ load_sensor:
   enabled: true
   scope: global
   resource_name: qpu_ready
+  slots_resource_name: qpu_slots
   provider: warden
   timeout_seconds: 3
 
 warden:
   base_url: http://10.100.0.1:4207
   endpoint: /accessible
+  slots_endpoint: /qpu-slots
   tls_verify: true

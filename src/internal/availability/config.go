@@ -24,9 +24,10 @@ type LoadSensorConfig struct {
 }
 
 type WardenConfig struct {
-	BaseURL   string `yaml:"base_url"`
-	Endpoint  string `yaml:"endpoint"`
-	TLSVerify bool   `yaml:"tls_verify"`
+	BaseURL       string `yaml:"base_url"`
+	Endpoint      string `yaml:"endpoint"`
+	SlotsEndpoint string `yaml:"slots_endpoint"`
+	TLSVerify     bool   `yaml:"tls_verify"`
 }
 
 type StaticConfig struct {
@@ -72,6 +73,9 @@ func (c *Config) ApplyDefaults() {
 	if c.Warden.Endpoint == "" {
 		c.Warden.Endpoint = "/accessible"
 	}
+	if c.Warden.SlotsEndpoint == "" {
+		c.Warden.SlotsEndpoint = "/qpu-slots"
+	}
 }
 
 func (c Config) Provider() (AvailabilityProvider, time.Duration, error) {
@@ -81,9 +85,11 @@ func (c Config) Provider() (AvailabilityProvider, time.Duration, error) {
 		return StaticProvider{Ready: c.Static.Ready, StateFile: c.Static.StateFile}, timeout, nil
 	case "warden":
 		provider := WardenProvider{
-			BaseURL:   c.Warden.BaseURL,
-			Endpoint:  c.Warden.Endpoint,
-			TLSVerify: c.Warden.TLSVerify,
+			BaseURL:       c.Warden.BaseURL,
+			Endpoint:      c.Warden.Endpoint,
+			SlotsEndpoint: c.Warden.SlotsEndpoint,
+			ReadSlots:     c.LoadSensor.SlotsResourceName != "",
+			TLSVerify:     c.Warden.TLSVerify,
 		}
 		return provider.WithTimeout(timeout), timeout, nil
 	default:

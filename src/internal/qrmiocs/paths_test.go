@@ -14,25 +14,17 @@ import (
 
 var _ = Describe("ResolveJobEnvPath", func() {
 	BeforeEach(func() {
-		GinkgoT().Setenv("SGE_JOB_ENV", "")
 		GinkgoT().Setenv("SGE_JOB_SPOOL_DIR", "")
 	})
 
-	It("uses SGE_JOB_ENV when set", func() {
-		GinkgoT().Setenv("SGE_JOB_ENV", "/var/spool/job/env")
-		got, err := qrmiocs.ResolveJobEnvPath()
-		Expect(err).ToNot(HaveOccurred())
-		Expect(got).To(Equal("/var/spool/job/env"))
-	})
-
-	It("falls back to SGE_JOB_SPOOL_DIR/environment", func() {
+	It("uses SGE_JOB_SPOOL_DIR/environment", func() {
 		GinkgoT().Setenv("SGE_JOB_SPOOL_DIR", "/var/spool/job")
 		got, err := qrmiocs.ResolveJobEnvPath()
 		Expect(err).ToNot(HaveOccurred())
 		Expect(got).To(Equal(filepath.Join("/var/spool/job", "environment")))
 	})
 
-	It("errors when neither var is set", func() {
+	It("errors when the spool directory is unset", func() {
 		_, err := qrmiocs.ResolveJobEnvPath()
 		Expect(err).To(HaveOccurred())
 	})
@@ -40,29 +32,19 @@ var _ = Describe("ResolveJobEnvPath", func() {
 
 var _ = Describe("ResolveMetadataPath", func() {
 	BeforeEach(func() {
-		GinkgoT().Setenv("QRMI_OCS_METADATA_PATH", "")
 		GinkgoT().Setenv("SGE_JOB_SPOOL_DIR", "")
-		GinkgoT().Setenv("JOB_ID", "")
 	})
 
-	It("uses the explicit override first", func() {
-		GinkgoT().Setenv("QRMI_OCS_METADATA_PATH", "/tmp/custom.tsv")
+	It("uses the scheduler spool directory", func() {
 		GinkgoT().Setenv("SGE_JOB_SPOOL_DIR", "/var/spool/job")
-		Expect(qrmiocs.ResolveMetadataPath()).To(Equal("/tmp/custom.tsv"))
+		path, err := qrmiocs.ResolveMetadataPath()
+		Expect(err).ToNot(HaveOccurred())
+		Expect(path).To(Equal(filepath.Join("/var/spool/job", qrmiocs.MetadataFilename)))
 	})
 
-	It("uses spool dir when override is unset", func() {
-		GinkgoT().Setenv("SGE_JOB_SPOOL_DIR", "/var/spool/job")
-		Expect(qrmiocs.ResolveMetadataPath()).To(Equal(filepath.Join("/var/spool/job", qrmiocs.MetadataFilename)))
-	})
-
-	It("falls back to /tmp with JOB_ID when spool dir is unset", func() {
-		GinkgoT().Setenv("JOB_ID", "12345")
-		Expect(qrmiocs.ResolveMetadataPath()).To(Equal("/tmp/qrmi_ocs_12345.tsv"))
-	})
-
-	It("falls back to /tmp/qrmi_ocs_acquired.tsv as last resort", func() {
-		Expect(qrmiocs.ResolveMetadataPath()).To(Equal("/tmp/" + qrmiocs.MetadataFilename))
+	It("errors when the scheduler spool directory is unset", func() {
+		_, err := qrmiocs.ResolveMetadataPath()
+		Expect(err).To(HaveOccurred())
 	})
 })
 

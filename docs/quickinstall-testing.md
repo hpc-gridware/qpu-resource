@@ -5,7 +5,16 @@ Copyright 2026 Pasqal and its contributors.
 This runbook is for admins validating and operating QRMI integration on
 Gridware/Open Cluster Scheduler (OCS), with Pasqal Cloud only.
 
-The same core scheduler commands are available in `demo/qrmi/quickinstall.sh`.
+For the resource model and job lifecycle, start with the
+[project overview](../README.md#architecture). This runbook covers the
+`EMU_FREE` cloud path; dynamic Pasqal Local readiness and capacity are covered
+in the [Load Sensor guide](../load_sensor.md). The pending Pasqal Local
+upstream changes listed there do not affect this released-QRMI cloud path.
+
+The same core scheduler commands are available in
+[`demo/qrmi/quickinstall.sh`](../demo/qrmi/quickinstall.sh). The Grid Engine
+design implemented here is described in the 2026 paper
+[*Examining QRMI as a Unified Interface for Quantum-HPC Integration*](https://arxiv.org/abs/2607.19591).
 
 ## 0) Admin Preconditions
 
@@ -127,9 +136,9 @@ image so no host-side QRMI checkout is required.
 
 ```bash
 cd /shared/gridware-adapter
-make build-go-hooks                    # builds against QRMI v0.13.3
+make build-go-hooks                    # builds against QRMI v0.20.0
 # or, to pin a different version:
-make build-go-hooks QRMI_REF=v0.13.3
+make build-go-hooks QRMI_REF=v0.20.0
 ```
 
 Outputs land in `bin/go-hooks/`:
@@ -146,7 +155,7 @@ mkdir -p /shared/gridware-adapter/bin
 
 gcc -Wall -Wextra -O2 \
   -I/shared/qrmi \
-  -L/shared/qrmi/libqrmi-0.12.0 \
+  -L/shared/qrmi/libqrmi-0.20.0 \
   -Wl,-rpath,'$ORIGIN' \
   -o /shared/gridware-adapter/bin/qrmi-ocs-prolog \
   /shared/gridware-adapter/src/cmd/qrmi-ocs-prolog/main.c \
@@ -154,7 +163,7 @@ gcc -Wall -Wextra -O2 \
 
 gcc -Wall -Wextra -O2 \
   -I/shared/qrmi \
-  -L/shared/qrmi/libqrmi-0.12.0 \
+  -L/shared/qrmi/libqrmi-0.20.0 \
   -Wl,-rpath,'$ORIGIN' \
   -o /shared/gridware-adapter/bin/qrmi-ocs-epilog \
   /shared/gridware-adapter/src/cmd/qrmi-ocs-epilog/main.c \
@@ -164,10 +173,10 @@ gcc -Wall -Wextra -O2 \
 #### Copy hooks and QRMI shared lib to master
 
 For Option A, source paths are `bin/go-hooks/`. For Option B, source
-paths are `bin/qrmi-ocs-*` plus `/shared/qrmi/libqrmi-0.12.0/libqrmi.so`.
+paths are `bin/qrmi-ocs-*` plus `/shared/qrmi/libqrmi-0.20.0/libqrmi.so`.
 
 ```bash
-docker exec ocs-master /bin/bash -lc 'mkdir -p /tmp/qrmi-hooks && chown gridware:users /tmp/qrmi-hooks'
+docker exec ocs-master /bin/bash -lc 'mkdir -p /tmp/qrmi-hooks && chown root:root /tmp/qrmi-hooks && chmod 755 /tmp/qrmi-hooks'
 
 # Option A (Go hooks):
 docker cp /shared/gridware-adapter/bin/go-hooks/qrmi-ocs-prolog ocs-master:/tmp/qrmi-hooks/qrmi-ocs-prolog
@@ -177,18 +186,19 @@ docker cp /shared/gridware-adapter/bin/go-hooks/libqrmi.so      ocs-master:/tmp/
 # Option B (C hooks):
 # docker cp /shared/gridware-adapter/bin/qrmi-ocs-prolog ocs-master:/tmp/qrmi-hooks/qrmi-ocs-prolog
 # docker cp /shared/gridware-adapter/bin/qrmi-ocs-epilog ocs-master:/tmp/qrmi-hooks/qrmi-ocs-epilog
-# docker cp /shared/qrmi/libqrmi-0.12.0/libqrmi.so      ocs-master:/tmp/qrmi-hooks/libqrmi.so
+# docker cp /shared/qrmi/libqrmi-0.20.0/libqrmi.so      ocs-master:/tmp/qrmi-hooks/libqrmi.so
 
-docker exec ocs-master /bin/bash -lc 'chown gridware:users /tmp/qrmi-hooks/qrmi-ocs-prolog /tmp/qrmi-hooks/qrmi-ocs-epilog /tmp/qrmi-hooks/libqrmi.so && chmod +x /tmp/qrmi-hooks/qrmi-ocs-prolog /tmp/qrmi-hooks/qrmi-ocs-epilog'
+docker exec ocs-master /bin/bash -lc 'chown root:root /tmp/qrmi-hooks/qrmi-ocs-prolog /tmp/qrmi-hooks/qrmi-ocs-epilog /tmp/qrmi-hooks/libqrmi.so && chmod 755 /tmp/qrmi-hooks/qrmi-ocs-prolog /tmp/qrmi-hooks/qrmi-ocs-epilog /tmp/qrmi-hooks/libqrmi.so'
 ```
 
 ### 2.4) Install `qrmi_config.json` for `EMU_FREE`
 
-Write the runtime config on all OCS nodes:
+The Go hooks read `/etc/qrmi/qrmi_config.json` by default. Write the runtime
+config on all OCS nodes:
 
 ```bash
 for c in ocs-master ocs-worker1 ocs-worker2; do
-  docker exec "$c" /bin/bash -lc "cat > /etc/slurm/qrmi_config.json <<'JSON'
+  docker exec "$c" /bin/bash -lc "mkdir -p /etc/qrmi && cat > /etc/qrmi/qrmi_config.json <<'JSON'
 {
   \"version\": \"1.0\",
   \"resources\": [
@@ -205,6 +215,9 @@ for c in ocs-master ocs-worker1 ocs-worker2; do
 JSON"
 done
 ```
+
+For the legacy C hooks, write the same file to
+`/etc/slurm/qrmi_config.json` instead.
 
 ### 2.5) Setup QRMI support (automatic)
 
@@ -307,7 +320,7 @@ If needed, re-run `setup-qrmi-support` from section `2.5`.
 ### 4.2) Pasqal Cloud call returns `401 Unauthorized`
 
 - Recheck `~/.pasqal/config` on the execution node (`ocs-master`/workers).
-- Recheck `QRMI_PASQAL_CLOUD_PROJECT_ID` in `/etc/slurm/qrmi_config.json`.
+- Recheck `QRMI_PASQAL_CLOUD_PROJECT_ID` in `/etc/qrmi/qrmi_config.json`.
 - Verify account/project access in Pasqal portal.
 - If credentials are correct and still failing, check Pasqal Cloud service status.
 

@@ -42,7 +42,11 @@ func main() {
 // example because the job was rejected before it ran).
 func run() int {
 	qrmi.SetLogCallback(log.QRMILog)
-	metaPath := qrmiocs.ResolveMetadataPath()
+	metaPath, err := qrmiocs.ResolveMetadataPath()
+	if err != nil {
+		log.Error("resolve metadata path: %v", err)
+		return 1
+	}
 	rec, readErr := qrmiocs.ReadStrictSingle(metaPath)
 	if readErr != nil && errors.Is(readErr, fs.ErrNotExist) {
 		log.Info("no metadata file found at %s; skipping release", metaPath)
@@ -59,8 +63,12 @@ func run() int {
 		failed = 1
 	}
 
-	if err := os.Remove(metaPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		log.Warn("failed to remove metadata file %s: %v", metaPath, err)
+	if failed == 0 {
+		if err := os.Remove(metaPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			log.Warn("failed to remove metadata file %s: %v", metaPath, err)
+		}
+	} else {
+		log.Warn("retaining metadata file %s for administrator recovery", metaPath)
 	}
 
 	elapsed := int64(time.Since(start).Seconds())

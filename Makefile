@@ -7,7 +7,7 @@
 
 # QRMI tag or branch to build the Go hooks against. Override on the
 # command line: make build-go-hooks QRMI_REF=main
-QRMI_REF ?= v0.13.3
+QRMI_REF ?= 0.20.0
 
 # Output directories for produced binaries.
 ADAPTER_OUT ?= bin/adapter
@@ -28,7 +28,7 @@ help:
 	@echo "  build-go-hooks     Build Go OCS prolog/epilog hooks via Docker"
 	@echo "                     (clones QRMI from upstream and links libqrmi.so)"
 	@echo ""
-	@echo "Override QRMI version: make build-go-hooks QRMI_REF=v0.13.3"
+	@echo "Override QRMI version: make build-go-hooks QRMI_REF=0.20.0"
 
 .PHONY: test
 test:

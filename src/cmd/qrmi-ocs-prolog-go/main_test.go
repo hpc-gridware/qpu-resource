@@ -6,7 +6,9 @@ package main
 import (
 	"errors"
 	"os"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -23,47 +25,44 @@ func TestProlog(t *testing.T) {
 
 var _ = Describe("prolog run()", func() {
 	BeforeEach(func() {
-		GinkgoT().Setenv("SGE_HGR_qpu", "")
-		GinkgoT().Setenv("SGE_SGR_qpu", "")
 		GinkgoT().Setenv("SGE_JOB_ENV", "")
 		GinkgoT().Setenv("SGE_JOB_SPOOL_DIR", "")
-		GinkgoT().Setenv("QRMI_OCS_CONFIG_PATH", "")
-		GinkgoT().Setenv("QRMI_OCS_RESOURCE_NAME", "")
-		GinkgoT().Setenv("QRMI_OCS_SLOTS_RESOURCE_NAME", "")
-		GinkgoT().Setenv("QRMI_OCS_QCONF_PATH", "")
 		GinkgoT().Setenv("QRMI_OCS_LOG_LEVEL", "")
 		GinkgoT().Setenv("RUST_LOG", "")
-		GinkgoT().Setenv("HOST", "")
-		GinkgoT().Setenv("HOSTNAME", "")
-		GinkgoT().Setenv("SGE_BINARY_PATH", "")
 		GinkgoT().Setenv("JOB_ID", "")
-		GinkgoT().Setenv("SGE_HGR_qpu_slots", "")
-		GinkgoT().Setenv("SGE_SGR_qpu_slots", "")
+		GinkgoT().Setenv("SGE_TASK_ID", "")
 	})
 
-	It("fails when no granted value is in the environment", func() {
+	It("fails when scheduler state has no requested backend", func() {
 		spool := GinkgoT().TempDir()
-		GinkgoT().Setenv("SGE_JOB_ENV", filepath.Join(spool, "environment"))
-		err := run()
+		GinkgoT().Setenv("SGE_JOB_SPOOL_DIR", spool)
+		GinkgoT().Setenv("JOB_ID", "42")
+		cfg := defaultHookConfig()
+		cfg.QstatPath = writeQstat(GinkgoT(), spool, "")
+		err := runWithConfig("", cfg)
 		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("no granted value"))
+		Expect(err.Error()).To(ContainSubstring("requested resource not found"))
 	})
 
 	It("fails when granted value contains a weighted backend", func() {
 		spool := GinkgoT().TempDir()
-		GinkgoT().Setenv("SGE_JOB_ENV", filepath.Join(spool, "environment"))
-		GinkgoT().Setenv("SGE_HGR_qpu", "EMU_FREE(2)")
-		err := run()
+		GinkgoT().Setenv("SGE_JOB_SPOOL_DIR", spool)
+		GinkgoT().Setenv("JOB_ID", "42")
+		cfg := defaultHookConfig()
+		cfg.QstatPath = writeQstat(GinkgoT(), spool, "hard_resource_list: qpu=EMU_FREE(2)")
+		err := runWithConfig("", cfg)
 		Expect(err).To(HaveOccurred())
 	})
 
-	It("uses SGE_SGR_qpu when SGE_HGR_qpu is empty", func() {
+	It("uses a soft resource request from scheduler state", func() {
 		spool := GinkgoT().TempDir()
-		GinkgoT().Setenv("SGE_JOB_ENV", filepath.Join(spool, "environment"))
-		GinkgoT().Setenv("SGE_SGR_qpu", "EMU_FREE")
+		GinkgoT().Setenv("SGE_JOB_SPOOL_DIR", spool)
+		GinkgoT().Setenv("JOB_ID", "42")
+		cfg := defaultHookConfig()
+		cfg.QstatPath = writeQstat(GinkgoT(), spool, "soft_resource_list: qpu=EMU_FREE")
 		// Without QRMI we never reach the acquire path, but the granted parse
 		// should succeed and the next failure should be the QRMI load step.
-		err := run()
+		err := runWithConfig("", cfg)
 		Expect(err).To(HaveOccurred())
 		// On stub builds the QRMI load returns ErrNotAvailable.
 		if !errors.Is(err, qrmi.ErrNotAvailable) {
@@ -74,10 +73,12 @@ var _ = Describe("prolog run()", func() {
 	It("records QRMI_PLUGIN_ERROR in the job env on failure", func() {
 		spool := GinkgoT().TempDir()
 		jobEnvPath := filepath.Join(spool, "environment")
-		GinkgoT().Setenv("SGE_JOB_ENV", jobEnvPath)
-		GinkgoT().Setenv("SGE_HGR_qpu", "EMU_FREE")
+		GinkgoT().Setenv("SGE_JOB_SPOOL_DIR", spool)
+		GinkgoT().Setenv("JOB_ID", "42")
+		cfg := defaultHookConfig()
+		cfg.QstatPath = writeQstat(GinkgoT(), spool, "hard_resource_list: qpu=EMU_FREE")
 
-		err := run()
+		err := runWithConfig("", cfg)
 		Expect(err).To(HaveOccurred())
 
 		data, _ := os.ReadFile(jobEnvPath)
@@ -85,42 +86,36 @@ var _ = Describe("prolog run()", func() {
 		Expect(string(data)).To(ContainSubstring("qrmi_prolog_status=error\n"))
 	})
 
-	It("respects QRMI_OCS_RESOURCE_NAME override", func() {
-		spool := GinkgoT().TempDir()
-		GinkgoT().Setenv("SGE_JOB_ENV", filepath.Join(spool, "environment"))
-		GinkgoT().Setenv("QRMI_OCS_RESOURCE_NAME", "qpu_alt")
-		GinkgoT().Setenv("SGE_HGR_qpu_alt", "EMU_FREE")
-
-		err := run()
-		Expect(err).To(HaveOccurred())
-		// Without an SGE_HGR_qpu, the only way the parse reached the QRMI
-		// load (and failed there) is if the override worked.
-		if !errors.Is(err, qrmi.ErrNotAvailable) {
-			Skip("test only validates stub-build error path")
-		}
+	It("takes administrator settings from hook arguments", func() {
+		cfg, owner, err := parseHookArgs([]string{
+			"--config=/etc/site/qrmi.json",
+			"--resource=qpu_alt",
+			"--slots-resource=capacity",
+			"--qstat=/opt/ocs/bin/qstat",
+			"alice",
+		})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(owner).To(Equal("alice"))
+		Expect(cfg).To(Equal(hookConfig{
+			ConfigPath:        "/etc/site/qrmi.json",
+			ResourceName:      "qpu_alt",
+			SlotsResourceName: "capacity",
+			QstatPath:         "/opt/ocs/bin/qstat",
+		}))
 	})
 
-	It("uses host complex_values when OCS does not export a non-consumable grant", func() {
+	It("reads backend and slots from scheduler job state", func() {
 		spool := GinkgoT().TempDir()
-		qconf := filepath.Join(spool, "qconf")
-		err := os.WriteFile(qconf, []byte("#!/bin/sh\nprintf '%s\n' 'hostname ocs-master' 'complex_values qpu=EMU_FREE,qpu_slots=1'\n"), 0o755)
+		qstat := writeQstat(GinkgoT(), spool, "hard_resource_list: qpu=PASQAL_LOCAL,qpu_slots=3")
+		GinkgoT().Setenv("JOB_ID", "1234")
+
+		backend, err := readGranted("qpu", qstat)
 		Expect(err).NotTo(HaveOccurred())
-
-		GinkgoT().Setenv("SGE_JOB_ENV", filepath.Join(spool, "environment"))
-		GinkgoT().Setenv("HOST", "ocs-master")
-		GinkgoT().Setenv("QRMI_OCS_QCONF_PATH", qconf)
-
-		err = run()
-		Expect(err).To(HaveOccurred())
-		if !errors.Is(err, qrmi.ErrNotAvailable) {
-			Skip("test only validates stub-build error path")
-		}
-	})
-
-	It("parses multiline host complex_values", func() {
-		value, err := parseHostComplexValue([]byte("hostname ocs-master\ncomplex_values qpu=PASQAL_LOCAL, \\\n                      qpu_slots=1\nprocessors 20\n"), "qpu")
+		Expect(backend).To(Equal("PASQAL_LOCAL"))
+		slots, ok, err := readGrantedSlots("qpu_slots", qstat)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(value).To(Equal("PASQAL_LOCAL"))
+		Expect(ok).To(BeTrue())
+		Expect(slots).To(Equal(3))
 	})
 
 	It("exports scheduler job id and uid for Pasqal Local", func() {
@@ -129,18 +124,22 @@ var _ = Describe("prolog run()", func() {
 		Expect(err).To(HaveOccurred())
 		Expect(jobEnv).To(BeNil())
 
-		GinkgoT().Setenv("SGE_JOB_ENV", filepath.Join(spool, "environment"))
+		GinkgoT().Setenv("SGE_JOB_SPOOL_DIR", spool)
 		GinkgoT().Setenv("JOB_ID", "1234")
-		GinkgoT().Setenv("SGE_HGR_qpu_slots", "5.000000")
+		GinkgoT().Setenv("SGE_TASK_ID", "7")
+		cfg := defaultHookConfig()
+		cfg.QstatPath = writeQstat(GinkgoT(), spool, "hard_resource_list: qpu_slots=5.000000")
 		jobEnv, err = qrmiocs.OpenJobEnv()
 		Expect(err).NotTo(HaveOccurred())
 		defer jobEnv.Close()
-		Expect(exportSchedulerJobEnv(jobEnv, defaultSlotsResourceName)).To(Succeed())
+		account, err := user.Current()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(exportSchedulerJobEnv(jobEnv, cfg, account.Username)).To(Succeed())
 
 		data, err := os.ReadFile(filepath.Join(spool, "environment"))
 		Expect(err).NotTo(HaveOccurred())
-		Expect(string(data)).To(ContainSubstring("QRMI_JOB_UID="))
-		Expect(string(data)).To(ContainSubstring("QRMI_JOB_ID=1234\n"))
+		Expect(string(data)).To(ContainSubstring("QRMI_JOB_UID=" + strconv.Itoa(os.Getuid()) + "\n"))
+		Expect(string(data)).To(ContainSubstring("QRMI_JOB_ID=1234.7\n"))
 		Expect(string(data)).To(ContainSubstring("QRMI_JOB_QPU_SLOTS=5\n"))
 	})
 
@@ -154,3 +153,11 @@ var _ = Describe("prolog run()", func() {
 		Expect(err).To(HaveOccurred())
 	})
 })
+
+func writeQstat(t GinkgoTInterface, dir, line string) string {
+	t.Helper()
+	path := filepath.Join(dir, "qstat")
+	content := "#!/bin/sh\nprintf '%s\\n' '" + line + "'\n"
+	Expect(os.WriteFile(path, []byte(content), 0o755)).To(Succeed())
+	return path
+}

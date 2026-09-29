@@ -15,8 +15,7 @@ import (
 // prolog: brackets, braces, parens, commas, semicolons, and whitespace.
 const trimCutset = "[]{}(),;"
 
-// ParseGrantedBackend parses a single backend name from the granted resource
-// value supplied by the scheduler in SGE_HGR_<resource> or SGE_SGR_<resource>.
+// ParseGrantedBackend parses one backend from the scheduler's resource list.
 //
 // The current single-backend model accepts forms like:
 //

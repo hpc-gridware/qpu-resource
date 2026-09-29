@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"testing"
 
 	qconf "github.com/hpc-gridware/go-clusterscheduler/pkg/qconf/v9.0"
@@ -102,6 +103,36 @@ func TestParseSingleBackendName(t *testing.T) {
 	}
 }
 
+func TestQRMIQueueHookCommand(t *testing.T) {
+	tests := []struct {
+		name         string
+		path         string
+		passJobOwner bool
+		want         string
+	}{
+		{name: "prolog", path: "/opt/qrmi/prolog", passJobOwner: true, want: "root@/opt/qrmi/prolog $job_owner"},
+		{name: "epilog", path: "/opt/qrmi/epilog", want: "root@/opt/qrmi/epilog"},
+		{name: "disabled", path: "NONE", passJobOwner: true, want: "NONE"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := qrmiQueueHookCommand(tt.path, tt.passJobOwner)
+			if err != nil {
+				t.Fatalf("qrmiQueueHookCommand returned error: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("qrmiQueueHookCommand mismatch: got=%q want=%q", got, tt.want)
+			}
+		})
+	}
+	if _, err := qrmiQueueHookCommand("/opt/qrmi/prolog --flag", true); err == nil {
+		t.Fatal("expected whitespace in hook path to be rejected")
+	}
+	if _, err := qrmiQueueHookCommand("qrmi@/opt/qrmi/prolog", true); err == nil {
+		t.Fatal("expected an explicit hook user to be rejected")
+	}
+}
+
 func TestSetupQRMISupportFlagValidation(t *testing.T) {
 	err := runSetupQRMISupport([]string{})
 	if err == nil || err.Error() != "--hosts is required" {
@@ -142,7 +173,8 @@ QrmiResourceDef *qrmi_config_resource_def_get(QrmiConfig *config, const char *re
 }
 const char *qrmi_config_resource_type_to_str(QrmiResourceType type) { (void)type; return "pasqal-cloud"; }
 QrmiReturnCode qrmi_config_resource_def_free(QrmiResourceDef *ptr) { (void)ptr; return QRMI_RETURN_CODE_SUCCESS; }
-const char *qrmi_get_last_error(void) { return ""; }
+char *qrmi_get_last_error(void) { return ""; }
+QrmiReturnCode qrmi_log_callback_set(QrmiLogCallback callback) { (void)callback; return QRMI_RETURN_CODE_SUCCESS; }
 QrmiQuantumResource *qrmi_resource_new(const char *resource_id, QrmiResourceType resource_type) {
   (void)resource_id;
   (void)resource_type;
@@ -174,16 +206,37 @@ QrmiReturnCode qrmi_resource_release(QrmiQuantumResource *qrmi, const char *acqu
 int main(void) {
   QrmiKeyValue kv = { .key = "QRMI_SAMPLE", .value = "from_config" };
   QrmiEnvironmentVariables env = { .variables = &kv, .length = 1 };
+  uid_t uid;
   FILE *job_env;
+  FILE *qstat;
+  char qstat_template[] = "/tmp/qrmi_qstat_XXXXXX";
+  char *requested = NULL;
+  int qstat_fd;
   const char *value;
   if (setenv("test_backend_QRMI_SAMPLE", "override", 1) != 0) { return 90; }
   job_env = tmpfile();
   if (job_env == NULL) { return 91; }
   if (apply_backend_env(job_env, "test_backend", env) != 0) { return 1; }
   value = getenv("test_backend_QRMI_SAMPLE");
-  fclose(job_env);
   if (value == NULL) { return 2; }
   if (strcmp(value, "from_config") != 0) { return 3; }
+  if (scheduler_job_uid(NULL, &uid) != 0 || uid != getuid()) { return 4; }
+  fclose(job_env);
+  qstat_fd = mkstemp(qstat_template);
+  if (qstat_fd < 0) { return 8; }
+  qstat = fdopen(qstat_fd, "w");
+  if (qstat == NULL) { close(qstat_fd); return 9; }
+  if (fprintf(qstat, "#!/bin/sh\nprintf '%%%%s\\n' 'hard_resource_list: qpu=test_backend,qpu_slots=3'\n") < 0) { return 10; }
+  if (fclose(qstat) != 0 || chmod(qstat_template, 0700) != 0) { return 11; }
+  if (setenv("JOB_ID", "42", 1) != 0) { return 13; }
+  if (read_job_requested_resource("qpu", qstat_template, &requested) != 0 || strcmp(requested, "test_backend") != 0) { return 14; }
+  free(requested);
+  job_env = tmpfile();
+  if (job_env == NULL || export_scheduler_slots(job_env, "qpu_slots", qstat_template) != 0) { return 15; }
+  fclose(job_env);
+  value = getenv("QRMI_JOB_QPU_SLOTS");
+  unlink(qstat_template);
+  if (value == NULL || strcmp(value, "3") != 0) { return 16; }
   return 0;
 }
 `, cIncludePath(prologMain)),
@@ -203,7 +256,8 @@ func TestEpilogStrictMetadataBehavior(t *testing.T) {
 struct QrmiQuantumResource { int dummy; };
 static int g_release_calls = 0;
 
-const char *qrmi_get_last_error(void) { return ""; }
+char *qrmi_get_last_error(void) { return ""; }
+QrmiReturnCode qrmi_log_callback_set(QrmiLogCallback callback) { (void)callback; return QRMI_RETURN_CODE_SUCCESS; }
 QrmiQuantumResource *qrmi_resource_new(const char *resource_id, QrmiResourceType resource_type) {
   (void)resource_id;
   (void)resource_type;
@@ -223,8 +277,9 @@ int main(void) {
   char bad_type_line[] = "res\t1x\ttok\t123\n";
   char bad_epoch_line[] = "res\t1\ttok\t123x\n";
   char good_line[] = "res\t1\ttok\t123\n";
-  char metadata_template[] = "/tmp/qrmi_epilog_meta_XXXXXX";
-  char env_template[] = "/tmp/qrmi_epilog_env_XXXXXX";
+  char spool_template[] = "/tmp/qrmi_epilog_XXXXXX";
+  char metadata_path[PATH_MAX];
+  char env_path[PATH_MAX];
   int metadata_fd;
   int env_fd;
   FILE *metadata;
@@ -239,25 +294,27 @@ int main(void) {
   if (parse_record_line(good_line, &rec) != 0) { return 12; }
   free_record(&rec);
 
-  metadata_fd = mkstemp(metadata_template);
+  if (mkdtemp(spool_template) == NULL) { return 19; }
+  if (snprintf(metadata_path, sizeof(metadata_path), "%%s/%%s", spool_template, METADATA_FILENAME) >= (int)sizeof(metadata_path)) { return 20; }
+  if (snprintf(env_path, sizeof(env_path), "%%s/environment", spool_template) >= (int)sizeof(env_path)) { return 20; }
+  metadata_fd = open(metadata_path, O_WRONLY | O_CREAT | O_EXCL, 0600);
   if (metadata_fd < 0) { return 20; }
   metadata = fdopen(metadata_fd, "w");
   if (metadata == NULL) { return 21; }
   if (fprintf(metadata, "res\t1\ttok1\t1\nres\t1\ttok2\t2\n") < 0) { fclose(metadata); return 22; }
   fclose(metadata);
 
-  env_fd = mkstemp(env_template);
+  env_fd = open(env_path, O_WRONLY | O_CREAT | O_EXCL, 0600);
   if (env_fd < 0) { return 23; }
   close(env_fd);
 
-  if (setenv("QRMI_OCS_METADATA_PATH", metadata_template, 1) != 0) { return 24; }
-  if (setenv("SGE_JOB_ENV", env_template, 1) != 0) { return 25; }
+  if (setenv("SGE_JOB_SPOOL_DIR", spool_template, 1) != 0) { return 25; }
 
   rc = qrmi_ocs_epilog_main();
   if (rc == 0) { return 30; }
   if (g_release_calls != 0) { return 31; }
 
-  env_file = fopen(env_template, "r");
+  env_file = fopen(env_path, "r");
   if (env_file == NULL) { return 32; }
   env_len = fread(env_buf, 1, sizeof(env_buf) - 1, env_file);
   fclose(env_file);
@@ -265,7 +322,9 @@ int main(void) {
   if (strstr(env_buf, "qrmi_release_failed=1") == NULL) { return 33; }
   if (strstr(env_buf, "qrmi_epilog_status=error") == NULL) { return 34; }
 
-  unlink(env_template);
+  unlink(metadata_path);
+  unlink(env_path);
+  rmdir(spool_template);
   return 0;
 }
 `, cIncludePath(epilogMain)),
@@ -318,5 +377,29 @@ func runCHarness(t *testing.T, qrmiInclude, source string) {
 	runOut, err := run.CombinedOutput()
 	if err != nil {
 		t.Fatalf("run harness failed: %v\n%s", err, string(runOut))
+	}
+}
+
+func TestWithLoadSensorReplacesEarlierInstalls(t *testing.T) {
+	cases := []struct {
+		current []string
+		want    []string
+	}{
+		{nil, []string{"/opt/qrmi/bin/qrmi-ocs-load-sensor"}},
+		{[]string{"NONE"}, []string{"/opt/qrmi/bin/qrmi-ocs-load-sensor"}},
+		{
+			[]string{"NONE", "/shared/old/qrmi-ocs-load-sensor", "/opt/site/gpu-sensor"},
+			[]string{"/opt/site/gpu-sensor", "/opt/qrmi/bin/qrmi-ocs-load-sensor"},
+		},
+		{
+			[]string{"/opt/qrmi/bin/qrmi-ocs-load-sensor"},
+			[]string{"/opt/qrmi/bin/qrmi-ocs-load-sensor"},
+		},
+	}
+	for _, tc := range cases {
+		got := withLoadSensor(tc.current, "/opt/qrmi/bin/qrmi-ocs-load-sensor")
+		if !slices.Equal(got, tc.want) {
+			t.Errorf("withLoadSensor(%q) = %q, want %q", tc.current, got, tc.want)
+		}
 	}
 }

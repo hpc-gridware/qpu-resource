@@ -13,10 +13,12 @@ import (
 )
 
 type WardenProvider struct {
-	BaseURL   string
-	Endpoint  string
-	TLSVerify bool
-	Client    *http.Client
+	BaseURL       string
+	Endpoint      string
+	SlotsEndpoint string
+	ReadSlots     bool
+	TLSVerify     bool
+	Client        *http.Client
 }
 
 func (p WardenProvider) Status(ctx context.Context) (AvailabilityStatus, error) {
@@ -24,27 +26,10 @@ func (p WardenProvider) Status(ctx context.Context) (AvailabilityStatus, error) 
 	if client == nil {
 		client = p.httpClient(0)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.accessibleURL(), nil)
-	if err != nil {
-		return AvailabilityStatus{Ready: false, Reason: "invalid warden URL"}, err
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return AvailabilityStatus{Ready: false, Reason: "warden request failed"}, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return AvailabilityStatus{Ready: false, Reason: "warden returned HTTP error"}, fmt.Errorf("warden returned status %s", resp.Status)
-	}
 	var body struct {
-		IsAccessible      *bool `json:"is_accessible"`
-		QPUSlotsAvailable *int  `json:"qpu_slots_available"`
+		IsAccessible *bool `json:"is_accessible"`
 	}
-	decoder := json.NewDecoder(resp.Body)
-	if err := decoder.Decode(&body); err != nil {
-		return AvailabilityStatus{Ready: false, Reason: "warden response malformed"}, err
-	}
-	if err := ensureJSONEnd(decoder); err != nil {
+	if err := p.readJSON(ctx, client, p.Endpoint, &body); err != nil {
 		return AvailabilityStatus{Ready: false, Reason: "warden response malformed"}, err
 	}
 	if body.IsAccessible == nil {
@@ -54,10 +39,42 @@ func (p WardenProvider) Status(ctx context.Context) (AvailabilityStatus, error) 
 		slots := 0
 		return AvailabilityStatus{Ready: false, Reason: "warden reports unavailable", SlotsAvailable: &slots}, nil
 	}
-	if body.QPUSlotsAvailable != nil && *body.QPUSlotsAvailable < 0 {
+	if !p.ReadSlots {
+		return AvailabilityStatus{Ready: true, Reason: "warden reports accessible"}, nil
+	}
+	var capacity struct {
+		QPUSlotsAvailable *int `json:"qpu_slots_available"`
+	}
+	if err := p.readJSON(ctx, client, p.SlotsEndpoint, &capacity); err != nil {
+		return AvailabilityStatus{Ready: false, Reason: "warden slot response malformed"}, err
+	}
+	if capacity.QPUSlotsAvailable == nil {
+		return AvailabilityStatus{Ready: false, Reason: "warden slot response missing capacity"}, fmt.Errorf("missing qpu_slots_available")
+	}
+	if *capacity.QPUSlotsAvailable < 0 {
 		return AvailabilityStatus{Ready: false, Reason: "warden response has invalid slots"}, fmt.Errorf("negative qpu_slots_available")
 	}
-	return AvailabilityStatus{Ready: true, Reason: "warden reports accessible", SlotsAvailable: body.QPUSlotsAvailable}, nil
+	return AvailabilityStatus{Ready: true, Reason: "warden reports accessible", SlotsAvailable: capacity.QPUSlotsAvailable}, nil
+}
+
+func (p WardenProvider) readJSON(ctx context.Context, client *http.Client, endpoint string, target any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.endpointURL(endpoint), nil)
+	if err != nil {
+		return err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("warden returned status %s", resp.Status)
+	}
+	decoder := json.NewDecoder(resp.Body)
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	return ensureJSONEnd(decoder)
 }
 
 func ensureJSONEnd(decoder *json.Decoder) error {
@@ -84,9 +101,9 @@ func (p WardenProvider) httpClient(timeout time.Duration) *http.Client {
 	return &http.Client{Transport: transport, Timeout: timeout}
 }
 
-func (p WardenProvider) accessibleURL() string {
+func (p WardenProvider) endpointURL(endpoint string) string {
 	base := strings.TrimRight(p.BaseURL, "/")
-	endpoint := "/" + strings.TrimLeft(p.Endpoint, "/")
+	endpoint = "/" + strings.TrimLeft(endpoint, "/")
 	u, err := url.JoinPath(base, endpoint)
 	if err != nil {
 		return base + endpoint
