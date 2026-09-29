@@ -3,7 +3,7 @@
 **Schedule vendor-agnostic quantum resources through familiar `qsub` jobs.**
 
 [![arXiv](https://img.shields.io/badge/arXiv-2607.19591-b31b1b.svg)](https://arxiv.org/abs/2607.19591)
-[![Go](https://img.shields.io/badge/Go-1.24-00ADD8.svg)](https://go.dev/)
+[![Go](https://img.shields.io/badge/Go-1.26-00ADD8.svg)](https://go.dev/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 [Paper](https://arxiv.org/abs/2607.19591) ·
@@ -151,14 +151,15 @@ library, then cgo-builds the Go binaries against it. Output is written
 under `bin/go-hooks/`:
 
 ```bash
-make build-go-hooks                    # builds against QRMI v0.20.0 by default
+make build-go-hooks                    # builds against QRMI 0.25.1 by default
 make build-go-hooks QRMI_REF=main      # builds against QRMI main
+make build-go-hooks QRMI_FEATURES=munge # adds Pasqal Local (Warden) support
 ```
 
-The standard Docker target builds the cloud-capable QRMI library. Pasqal Local
-also requires QRMI's `munge` feature and `libmunge`; follow the
-[Pasqal Local build notes](load_sensor.md#build-artifacts) and use the
-`aw/qpu-slots` QRMI branch until PR #164 is released.
+The default Docker target builds the cloud-capable QRMI library. Pasqal Local
+also requires QRMI's `munge` feature and `libmunge.so.2` on the hosts; see the
+[Pasqal Local build notes](load_sensor.md#build-artifacts). QPU slot counts
+need the `aw/qpu-slots` QRMI branch until PR #164 is released.
 
 Outputs in `bin/go-hooks/`:
 
@@ -381,7 +382,7 @@ mkdir -p /shared/gridware-adapter/bin
 
 gcc -Wall -Wextra -O2 \
   -I/shared/qrmi \
-  -L/shared/qrmi/libqrmi-0.20.0 \
+  -L/shared/qrmi/libqrmi-0.25.1 \
   -Wl,-rpath,'$ORIGIN' \
   -o /shared/gridware-adapter/bin/qrmi-ocs-prolog \
   /shared/gridware-adapter/src/cmd/qrmi-ocs-prolog/main.c \
@@ -389,13 +390,13 @@ gcc -Wall -Wextra -O2 \
 
 gcc -Wall -Wextra -O2 \
   -I/shared/qrmi \
-  -L/shared/qrmi/libqrmi-0.20.0 \
+  -L/shared/qrmi/libqrmi-0.25.1 \
   -Wl,-rpath,'$ORIGIN' \
   -o /shared/gridware-adapter/bin/qrmi-ocs-epilog \
   /shared/gridware-adapter/src/cmd/qrmi-ocs-epilog/main.c \
   -lqrmi
 
-cp /shared/qrmi/libqrmi-0.20.0/libqrmi.so /shared/gridware-adapter/bin/
+cp /shared/qrmi/libqrmi-0.25.1/libqrmi.so /shared/gridware-adapter/bin/
 ```
 
 Hook behavior:

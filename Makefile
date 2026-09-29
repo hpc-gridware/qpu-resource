@@ -7,14 +7,17 @@
 
 # QRMI tag or branch to build the Go hooks against. Override on the
 # command line: make build-go-hooks QRMI_REF=main
-QRMI_REF ?= 0.20.0
+QRMI_REF ?= 0.25.1
+
+# QRMI cargo features, e.g. QRMI_FEATURES=munge for pasqal-local (Warden).
+QRMI_FEATURES ?=
 
 # Output directories for produced binaries.
 ADAPTER_OUT ?= bin/adapter
 HOOKS_OUT   ?= bin/go-hooks
 
 # Go build image used for the gridware-adapter (no cgo).
-ADAPTER_IMAGE ?= golang:1.24
+ADAPTER_IMAGE ?= golang:1.26
 
 # ----- Targets -----
 
@@ -28,7 +31,7 @@ help:
 	@echo "  build-go-hooks     Build Go OCS prolog/epilog hooks via Docker"
 	@echo "                     (clones QRMI from upstream and links libqrmi.so)"
 	@echo ""
-	@echo "Override QRMI version: make build-go-hooks QRMI_REF=0.20.0"
+	@echo "Override QRMI version: make build-go-hooks QRMI_REF=0.25.1"
 
 .PHONY: test
 test:
@@ -68,6 +71,7 @@ build-go-hooks:
 	  --output type=local,dest=$(HOOKS_OUT) \
 	  -f scripts/Dockerfile.hooks \
 	  --build-arg QRMI_REF=$(QRMI_REF) \
+	  --build-arg QRMI_FEATURES=$(QRMI_FEATURES) \
 	  .
 	@echo "Built into $(HOOKS_OUT):"
 	@ls -l $(HOOKS_OUT)

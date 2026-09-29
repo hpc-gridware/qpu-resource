@@ -112,7 +112,7 @@ docker run --rm --user $(id -u):$(id -g) \
   -e GOPATH=/tmp/go \
   -v "$PWD":/work \
   -w /work/gridware-adapter \
-  golang:1.24 /bin/sh -lc \
+  golang:1.26 /bin/sh -lc \
   'export PATH=/usr/local/go/bin:$PATH && go build -buildvcs=false -o /work/gridware-adapter/adapter ./src/cmd/gridware-adapter'
 ```
 
@@ -136,9 +136,9 @@ image so no host-side QRMI checkout is required.
 
 ```bash
 cd /shared/gridware-adapter
-make build-go-hooks                    # builds against QRMI v0.20.0
+make build-go-hooks                    # builds against QRMI 0.25.1
 # or, to pin a different version:
-make build-go-hooks QRMI_REF=v0.20.0
+make build-go-hooks QRMI_REF=0.25.1
 ```
 
 Outputs land in `bin/go-hooks/`:
@@ -155,7 +155,7 @@ mkdir -p /shared/gridware-adapter/bin
 
 gcc -Wall -Wextra -O2 \
   -I/shared/qrmi \
-  -L/shared/qrmi/libqrmi-0.20.0 \
+  -L/shared/qrmi/libqrmi-0.25.1 \
   -Wl,-rpath,'$ORIGIN' \
   -o /shared/gridware-adapter/bin/qrmi-ocs-prolog \
   /shared/gridware-adapter/src/cmd/qrmi-ocs-prolog/main.c \
@@ -163,7 +163,7 @@ gcc -Wall -Wextra -O2 \
 
 gcc -Wall -Wextra -O2 \
   -I/shared/qrmi \
-  -L/shared/qrmi/libqrmi-0.20.0 \
+  -L/shared/qrmi/libqrmi-0.25.1 \
   -Wl,-rpath,'$ORIGIN' \
   -o /shared/gridware-adapter/bin/qrmi-ocs-epilog \
   /shared/gridware-adapter/src/cmd/qrmi-ocs-epilog/main.c \
@@ -173,7 +173,7 @@ gcc -Wall -Wextra -O2 \
 #### Copy hooks and QRMI shared lib to master
 
 For Option A, source paths are `bin/go-hooks/`. For Option B, source
-paths are `bin/qrmi-ocs-*` plus `/shared/qrmi/libqrmi-0.20.0/libqrmi.so`.
+paths are `bin/qrmi-ocs-*` plus `/shared/qrmi/libqrmi-0.25.1/libqrmi.so`.
 
 ```bash
 docker exec ocs-master /bin/bash -lc 'mkdir -p /tmp/qrmi-hooks && chown root:root /tmp/qrmi-hooks && chmod 755 /tmp/qrmi-hooks'
@@ -186,7 +186,7 @@ docker cp /shared/gridware-adapter/bin/go-hooks/libqrmi.so      ocs-master:/tmp/
 # Option B (C hooks):
 # docker cp /shared/gridware-adapter/bin/qrmi-ocs-prolog ocs-master:/tmp/qrmi-hooks/qrmi-ocs-prolog
 # docker cp /shared/gridware-adapter/bin/qrmi-ocs-epilog ocs-master:/tmp/qrmi-hooks/qrmi-ocs-epilog
-# docker cp /shared/qrmi/libqrmi-0.20.0/libqrmi.so      ocs-master:/tmp/qrmi-hooks/libqrmi.so
+# docker cp /shared/qrmi/libqrmi-0.25.1/libqrmi.so      ocs-master:/tmp/qrmi-hooks/libqrmi.so
 
 docker exec ocs-master /bin/bash -lc 'chown root:root /tmp/qrmi-hooks/qrmi-ocs-prolog /tmp/qrmi-hooks/qrmi-ocs-epilog /tmp/qrmi-hooks/libqrmi.so && chmod 755 /tmp/qrmi-hooks/qrmi-ocs-prolog /tmp/qrmi-hooks/qrmi-ocs-epilog /tmp/qrmi-hooks/libqrmi.so'
 ```
