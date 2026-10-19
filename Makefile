@@ -7,7 +7,7 @@
 
 # QRMI tag or branch to build the Go hooks against. Override on the
 # command line: make build-go-hooks QRMI_REF=main
-QRMI_REF ?= 0.26.0
+QRMI_REF ?= 0.26.3
 
 # QRMI cargo features, e.g. QRMI_FEATURES=munge for pasqal-local (Warden).
 QRMI_FEATURES ?=
@@ -32,7 +32,7 @@ help:
 	@echo "  build-go-hooks     Build Go OCS prolog/epilog hooks via Docker"
 	@echo "                     (clones QRMI from upstream and links libqrmi.so)"
 	@echo ""
-	@echo "Override QRMI version: make build-go-hooks QRMI_REF=0.26.0"
+	@echo "Override QRMI version: make build-go-hooks QRMI_REF=0.26.3"
 
 .PHONY: test
 test:
