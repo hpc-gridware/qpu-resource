@@ -60,11 +60,19 @@ var _ = Describe("epilog run()", func() {
 		Expect(string(data)).To(ContainSubstring("qrmi_epilog_status_code=0\n"))
 	})
 
-	It("removes the metadata file after a parse failure", func() {
+	It("retains the metadata file after a parse failure", func() {
 		Expect(os.WriteFile(meta, []byte("badline\n"), 0o644)).To(Succeed())
 		Expect(run()).To(Equal(1))
 
 		_, err := os.Stat(meta)
-		Expect(os.IsNotExist(err)).To(BeTrue())
+		Expect(err).ToNot(HaveOccurred())
+	})
+
+	It("retains the metadata file after a release failure", func() {
+		Expect(os.WriteFile(meta, []byte("PASQAL_LOCAL\t4\tsession-id\t1\n"), 0o600)).To(Succeed())
+		Expect(run()).To(Equal(1))
+
+		_, err := os.Stat(meta)
+		Expect(err).ToNot(HaveOccurred())
 	})
 })

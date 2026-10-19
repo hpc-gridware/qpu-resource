@@ -1,0 +1,12 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "Grid Engine family QRMI Integration"
+type: software
+authors:
+  - family-names: Gruber
+    given-names: Daniel
+  - family-names: Wennersteen
+    given-names: Aleksander
+repository-code: "https://github.com/hpc-gridware/qpu-resource"
+date-released: 2026-03-30
+license: Apache-2.0

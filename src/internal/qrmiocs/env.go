@@ -30,9 +30,13 @@ func OpenJobEnv() (*JobEnv, error) {
 	if err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("open job env %s: %w", path, err)
+	}
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("set job env permissions %s: %w", path, err)
 	}
 	return &JobEnv{path: path, f: f, w: bufio.NewWriter(f)}, nil
 }
