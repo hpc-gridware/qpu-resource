@@ -33,6 +33,7 @@ repository.**
 | --- | --- |
 | Scheduler-native quantum resource selection and constraints | `qpu`, `qpu_slots`, and `qpu_ready` complexes configured by `gridware-adapter` |
 | Dynamic readiness and capacity | OCS Load Sensor with static and Pasqal Warden providers |
+| Submission-time checks | Optional Job Submission Verifier that rejects unusable `qpu` requests and adds `qpu_slots=1` |
 | Lifecycle management | QRMI acquisition in the queue prolog and release in the epilog |
 | Provider-independent configuration | Logical resource lookup through `qrmi_config.json` |
 | Runtime state and accounting | Per-job spool metadata, environment variables, and `qrmi_*` fields exposed through `qacct` |
@@ -119,6 +120,7 @@ are available. Resource names are administrator-defined entries in
 | --- | --- |
 | `src/cmd/gridware-adapter` | Configures complexes, host mappings, queue hooks, Load Sensors, and reporting |
 | `src/cmd/qrmi-ocs-load-sensor` | Publishes dynamic QPU readiness and capacity |
+| `src/cmd/qrmi-ocs-jsv` | Optional Job Submission Verifier for `qpu` requests |
 | `src/cmd/qrmi-ocs-prolog-go` / `qrmi-ocs-epilog-go` | Preferred Go lifecycle hooks |
 | `src/cmd/qrmi-ocs-prolog` / `qrmi-ocs-epilog` | Legacy C lifecycle hooks |
 | `src/internal/availability` | Static and Pasqal Warden availability providers |
@@ -141,6 +143,9 @@ make build-adapter
 
 make build-load-sensor
 # binary at bin/adapter/qrmi-ocs-load-sensor
+
+make build-jsv
+# binary at bin/adapter/qrmi-ocs-jsv
 ```
 
 ### Go OCS hooks (cgo against `libqrmi.so`)
@@ -336,6 +341,37 @@ the job.
 
 For the Pasqal Local setup, including Warden, MUNGE, QRMI config, and the
 readiness Load Sensor, see `load_sensor.md`.
+
+### Job Submission Verifier (optional)
+
+`qrmi-ocs-jsv` checks `qpu` requests when a job is submitted, so mistakes are
+reported by `qsub` instead of failing later in the prolog. It is the OCS
+counterpart of the Slurm job submit plugin and runs on the qmaster host as a
+server-side JSV:
+
+- Rejects a soft `qpu` request (`-soft -l qpu=...`).
+- Rejects wildcards or alternatives (`qpu=*`, `qpu=A|B`); the prolog needs one backend.
+- Rejects backends that are not in `/etc/qrmi/qrmi_config.json`. If the file
+  cannot be read, the job is rejected with `REJECT_WAIT` so the user can retry.
+- Adds `qpu_slots=1` to a `qpu` job that requests no `qpu_slots`.
+
+Copy the binary to the qmaster host and set it in the global configuration
+(`qconf -mconf`):
+
+```text
+jsv_url  script:/opt/qrmi/bin/qrmi-ocs-jsv
+```
+
+Set `jsv_url none` to disable it. qmaster starts the JSV without arguments.
+`QRMI_OCS_JSV_CONFIG` changes the QRMI config path, and
+`QRMI_OCS_JSV_SLOTS_RESOURCE` changes the slots resource name; set it to an
+empty value on clusters without the `qpu_slots` complex.
+
+```text
+$ qsub -l qpu=PASQAL_LOCAL job.sh      # accepted as qpu=PASQAL_LOCAL,qpu_slots=1
+$ qsub -l qpu=TYPO job.sh
+Unable to run job: qpu=TYPO is not in /etc/qrmi/qrmi_config.json.
+```
 
 ### `ensure-resource` (Advanced/Manual)
 
