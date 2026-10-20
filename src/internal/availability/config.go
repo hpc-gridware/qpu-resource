@@ -11,7 +11,13 @@ import (
 type Config struct {
 	LoadSensor LoadSensorConfig `yaml:"load_sensor"`
 	Warden     WardenConfig     `yaml:"warden"`
+	QRMI       QRMIConfig       `yaml:"qrmi"`
 	Static     StaticConfig     `yaml:"static"`
+}
+
+type QRMIConfig struct {
+	ConfigPath string `yaml:"config_path"`
+	Resource   string `yaml:"resource"`
 }
 
 type LoadSensorConfig struct {
@@ -76,6 +82,9 @@ func (c *Config) ApplyDefaults() {
 	if c.Warden.SlotsEndpoint == "" {
 		c.Warden.SlotsEndpoint = "/qpu-slots"
 	}
+	if c.QRMI.ConfigPath == "" {
+		c.QRMI.ConfigPath = "/etc/qrmi/qrmi_config.json"
+	}
 }
 
 func (c Config) Provider() (AvailabilityProvider, time.Duration, error) {
@@ -92,6 +101,15 @@ func (c Config) Provider() (AvailabilityProvider, time.Duration, error) {
 			TLSVerify:     c.Warden.TLSVerify,
 		}
 		return provider.WithTimeout(timeout), timeout, nil
+	case "qrmi":
+		if c.QRMI.Resource == "" {
+			return nil, timeout, fmt.Errorf("qrmi provider needs qrmi.resource")
+		}
+		return &QRMIProvider{
+			ConfigPath: c.QRMI.ConfigPath,
+			Resource:   c.QRMI.Resource,
+			ReadSlots:  c.LoadSensor.SlotsResourceName != "",
+		}, timeout, nil
 	default:
 		return nil, timeout, fmt.Errorf("unknown availability provider %q", c.LoadSensor.Provider)
 	}

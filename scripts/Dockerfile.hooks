@@ -66,6 +66,7 @@ RUN go build -tags qrmi -ldflags "-s -w" -o /out/qrmi-ocs-epilog ./src/cmd/qrmi-
 # The launcher starts the hooks with a clean environment; it must be static
 # so that no dynamic loader reads the job's environment.
 RUN CGO_ENABLED=0 go build -ldflags "-s -w" -o /out/qrmi-ocs-launch ./src/cmd/qrmi-ocs-launch
+RUN go build -tags qrmi -ldflags "-s -w" -o /out/qrmi-ocs-load-sensor ./src/cmd/qrmi-ocs-load-sensor
 RUN cp /qrmi/libqrmi.so /out/libqrmi.so
 
 # ---------- Stage 3: export artifacts to the host ----------
