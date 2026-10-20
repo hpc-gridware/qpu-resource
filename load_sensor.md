@@ -143,6 +143,33 @@ value. Missing slot data fails closed to `0`. Warden must be configured with
 Warden remains scheduler-neutral; it does not configure OCS, run `qconf`, or
 start this Load Sensor.
 
+`qrmi` reads any resource in `qrmi_config.json` through QRMI `status()`, with the
+same rule as the Slurm license poller: ready only if the resource is online and
+does not report itself as unhealthy or busy. When `slots_resource_name` is set,
+it reports the resource's `capacity.available_slots`; a resource that is not
+ready reports `0`. Build it with `make build-go-hooks` (cgo, `-tags qrmi`) and
+install it next to `libqrmi.so`. Pasqal Local needs a QRMI release that includes
+[QRMI #164](https://github.com/qiskit-community/qrmi/pull/164): released 0.26.x
+requires `QRMI_JOB_UID` to create the resource and does not send slot counts.
+
+```yaml
+load_sensor:
+  enabled: true
+  scope: global
+  resource_name: qpu_ready
+  slots_resource_name: qpu_slots
+  provider: qrmi
+  timeout_seconds: 10
+
+qrmi:
+  config_path: /etc/qrmi/qrmi_config.json
+  resource: PASQAL_LOCAL
+```
+
+The QRMI call cannot be cancelled, so `timeout_seconds` does not limit it.
+In tests with OCS 9.1.6, `sge_execd` started a newly configured Load Sensor
+only after it was restarted.
+
 ## Adapter Setup
 
 Load Sensor support is disabled by default. Enable it explicitly:
