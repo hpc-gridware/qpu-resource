@@ -182,6 +182,23 @@ func NewResource(name string, typ int) (*Resource, error) {
 	return &Resource{c: r}, nil
 }
 
+// NewResourceFromDef creates a QRMI quantum resource handle from a resource
+// definition's environment, without setting process environment variables.
+// The returned Resource must be released with Close.
+func NewResourceFromDef(name string, def *ResourceDef) (*Resource, error) {
+	if def == nil || def.c == nil {
+		return nil, errors.New("qrmi: resource definition is closed")
+	}
+	cname := C.CString(name)
+	defer C.free(unsafe.Pointer(cname))
+
+	r := C.qrmi_resource_new_from_config(cname, def.c._type, &def.c.environments)
+	if r == nil {
+		return nil, fmt.Errorf("qrmi_resource_new_from_config(%s): %s", name, lastError())
+	}
+	return &Resource{c: r}, nil
+}
+
 // Close releases the underlying C resource. Safe to call on a nil receiver.
 func (r *Resource) Close() {
 	if r == nil || r.c == nil {
@@ -204,6 +221,61 @@ func (r *Resource) IsAccessible() (bool, error) {
 		return false, fmt.Errorf("qrmi_resource_is_accessible: %s", lastError())
 	}
 	return bool(out), nil
+}
+
+// Status returns the resource status reported by the QRMI runtime. Paused and
+// offline resources are not Online.
+func (r *Resource) Status() (ResourceStatus, error) {
+	if r == nil || r.c == nil {
+		return ResourceStatus{}, errors.New("qrmi: resource is closed")
+	}
+	var st *C.QrmiResourceStatus
+	if rc := C.qrmi_resource_status(r.c, &st); rc != C.QRMI_RETURN_CODE_SUCCESS || st == nil {
+		return ResourceStatus{}, fmt.Errorf("qrmi_resource_status: %s", lastError())
+	}
+	defer C.qrmi_resource_status_free(st)
+
+	var code C.QrmiResourceStatusCode
+	if rc := C.qrmi_resource_status_code(st, &code); rc != C.QRMI_RETURN_CODE_SUCCESS {
+		return ResourceStatus{}, fmt.Errorf("qrmi_resource_status_code: %s", lastError())
+	}
+	out := ResourceStatus{Online: code == C.QRMI_RESOURCE_STATUS_CODE_ONLINE}
+	var err error
+	if out.Healthy, err = optionalBool("qrmi_resource_status_healthy", func(b *C.bool) C.QrmiReturnCode {
+		return C.qrmi_resource_status_healthy(st, b)
+	}); err != nil {
+		return ResourceStatus{}, err
+	}
+	if out.Busy, err = optionalBool("qrmi_resource_status_busy", func(b *C.bool) C.QrmiReturnCode {
+		return C.qrmi_resource_status_busy(st, b)
+	}); err != nil {
+		return ResourceStatus{}, err
+	}
+	var capacity *C.QrmiResourceCapacity
+	switch rc := C.qrmi_resource_status_capacity(st, &capacity); rc {
+	case C.QRMI_RETURN_CODE_SUCCESS:
+		slots := int(capacity.available_slots)
+		out.AvailableSlots = &slots
+		C.qrmi_resource_capacity_free(capacity)
+	case C.QRMI_RETURN_CODE_UNSUPPORTED_FUNCTION_ERROR:
+	default:
+		return ResourceStatus{}, fmt.Errorf("qrmi_resource_status_capacity: %s", lastError())
+	}
+	return out, nil
+}
+
+// optionalBool reads a status flag that a vendor may not report (nil).
+func optionalBool(name string, get func(*C.bool) C.QrmiReturnCode) (*bool, error) {
+	var b C.bool
+	switch get(&b) {
+	case C.QRMI_RETURN_CODE_SUCCESS:
+		v := bool(b)
+		return &v, nil
+	case C.QRMI_RETURN_CODE_UNSUPPORTED_FUNCTION_ERROR:
+		return nil, nil
+	default:
+		return nil, fmt.Errorf("%s: %s", name, lastError())
+	}
 }
 
 // Acquire obtains a fresh acquisition token from the backend. The returned

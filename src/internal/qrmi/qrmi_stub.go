@@ -40,8 +40,16 @@ type Resource struct{}
 // NewResource always returns ErrNotAvailable in stub builds.
 func NewResource(name string, typ int) (*Resource, error) { return nil, ErrNotAvailable }
 
+// NewResourceFromDef always returns ErrNotAvailable in stub builds.
+func NewResourceFromDef(name string, def *ResourceDef) (*Resource, error) {
+	return nil, ErrNotAvailable
+}
+
 // Close is a no-op in stub builds.
 func (r *Resource) Close() {}
+
+// Status always returns ErrNotAvailable in stub builds.
+func (r *Resource) Status() (ResourceStatus, error) { return ResourceStatus{}, ErrNotAvailable }
 
 // IsAccessible always returns ErrNotAvailable in stub builds.
 func (r *Resource) IsAccessible() (bool, error) { return false, ErrNotAvailable }
