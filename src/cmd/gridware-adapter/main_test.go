@@ -9,7 +9,7 @@ import (
 	"slices"
 	"testing"
 
-	qconf "github.com/hpc-gridware/go-clusterscheduler/pkg/qconf/v9.0"
+	qconf "github.com/hpc-gridware/go-clusterscheduler/pkg/qconf/v9.1"
 )
 
 func TestParseCSVTrimsAndDropsEmpty(t *testing.T) {

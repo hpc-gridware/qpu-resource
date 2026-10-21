@@ -13,7 +13,7 @@ import (
 	"slices"
 	"strings"
 
-	qconf "github.com/hpc-gridware/go-clusterscheduler/pkg/qconf/v9.0"
+	qconf "github.com/hpc-gridware/go-clusterscheduler/pkg/qconf/v9.1"
 )
 
 const defaultReportingPattern = "usage_patterns=qrmi:qrmi_*"
