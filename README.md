@@ -102,7 +102,7 @@ library, then cgo-builds the Go binaries against it. Output is written
 under `bin/go-hooks/`:
 
 ```bash
-make build-go-hooks                    # builds against QRMI v0.13.3 by default
+make build-go-hooks                    # builds against QRMI v0.20.0 by default
 make build-go-hooks QRMI_REF=main      # builds against QRMI main
 ```
 
@@ -130,13 +130,11 @@ make test    # runs Go unit tests; no QRMI required (uses stub build)
 make vet
 ```
 
-Two of the existing C-harness tests in `src/cmd/gridware-adapter`
+Two C-harness tests in `src/cmd/gridware-adapter`
 (`TestPrologApplyBackendEnvUsesConfiguredValue`,
-`TestEpilogStrictMetadataBehavior`) require a sibling `qrmi/` checkout
-at `${GOPATH}/src/github.com/hpc-gridware/qrmi` with the QRMI headers.
-Without it those two tests fail with `required path missing "qrmi"`;
-that is unrelated to the Go ports and matches the pre-existing
-behavior of the C hook tests.
+`TestEpilogStrictMetadataBehavior`) compile the C hooks against `qrmi.h`.
+Point `QRMI_INCLUDE_DIR` at a QRMI checkout, or check QRMI out next to this
+repository (`../qrmi`). Without either, they fail with `required path missing`.
 
 ## End-User Quick Start (OCS)
 
@@ -203,6 +201,58 @@ Apply all required OCS-side QRMI setup in one command:
 - set host `complex_values` to one backend name per host
 - set queue `prolog` and `epilog`
 - ensure global `reporting_params` contains `usage_patterns=qrmi:qrmi_*`
+
+The adapter installs the QRMI hooks as `<hook-user>@<path> … $job_owner`
+procedures. OCS runs them as that account and passes the job owner's name.
+`--hook-user` defaults to the cluster's `admin_user` from
+`$SGE_ROOT/$SGE_CELL/common/bootstrap`, or `root` when it is `none`. The hooks
+need that account for two reasons:
+
+- They write the QRMI variables and the acquisition metadata into the job's
+  spool directory (`$SGE_JOB_SPOOL_DIR/environment`), which OCS owns as its
+  admin account. This applies to every QRMI resource type.
+- For Pasqal Local, the prolog opens a Warden session on behalf of the job
+  owner's UID and the epilog revokes it. Warden allows only administrators to
+  do that, so add the hook account's UID to Warden's `admin_users` (`0` for root).
+
+Because the hooks run privileged with the job's environment, they trust only
+the scheduler:
+
+- The queue command starts them through `qrmi-ocs-launch`
+  (`<hook-user>@<dir>/qrmi-ocs-launch --sge-root=… --sge-cell=… [--spool-root=…]
+  [--qmaster-port=…] [--execd-port=…] <hook> … $job_owner`; `--launcher` sets
+  another path). `setup-qrmi-support` writes the launcher options from its own
+  `SGE_ROOT`, `SGE_CELL` and ports and the global `execd_spool_dir`. The
+  launcher is statically linked, so no dynamic loader reads the job's
+  environment. It refuses to run, failing the job, when `LD_*` or
+  `GLIBC_TUNABLES` is set. Otherwise it changes to `/` and starts the hook with:
+  `JOB_ID`, `SGE_TASK_ID` and `SGE_JOB_SPOOL_DIR` from OCS, validated (the
+  spool directory must be the job's own `…/active_jobs/<job>.<task>` below the
+  spool root, without symbolic links); `SGE_ROOT`, `SGE_CELL` and the ports from
+  its options; `TZ` if it is a plain time zone name; a fixed `PATH`, the hook
+  user's `HOME` and the `C` locale. Everything else is dropped: `QRMI_*` and
+  `<BACKEND>_QRMI_*` settings, proxy and TLS trust variables, `RUST_LOG` (the
+  hooks set it from `--log-level`), shell functions and the job owner's `HOME`.
+  The hooks repeat the loader check and the reset. Backend settings come only
+  from `qrmi_config.json` and the hook arguments. The hooks need no Pasqal Cloud
+  credentials; the job reads the job owner's `~/.pasqal/config`.
+- The QRMI config path, the absolute `qstat` path (with `qconf` next to it), the
+  resource names and the log level are part of the administrator-owned queue
+  command.
+- The prolog reads the job's hard request from `qstat -j` (`hard_resource_list`,
+  or `master_hard_resource_list` for `-scope master`). Soft requests are ignored,
+  and the backend must match the host's `complex_values`.
+
+The launcher, hook binaries, `qstat`/`qconf` and their parent directories must
+be writable only by administrators.
+
+Exit codes follow OCS's prolog semantics: `0` when the job is set up or
+requests no QPU, `100` (job error) when the request cannot be served, for
+example a backend missing from `qrmi_config.json`, `99` (reschedule) when the
+backend is temporarily unavailable, and `1` (queue error) only for host or
+configuration problems. A failed release in the epilog is logged and recorded
+in accounting (`qrmi_release_failed`), and the metadata file is kept for
+recovery, but the epilog still exits `0`.
 
 ```bash
 ./adapter setup-qrmi-support \
@@ -317,7 +367,7 @@ mkdir -p /shared/gridware-adapter/bin
 
 gcc -Wall -Wextra -O2 \
   -I/shared/qrmi \
-  -L/shared/qrmi/libqrmi-0.12.0 \
+  -L/shared/qrmi/libqrmi-0.20.0 \
   -Wl,-rpath,'$ORIGIN' \
   -o /shared/gridware-adapter/bin/qrmi-ocs-prolog \
   /shared/gridware-adapter/src/cmd/qrmi-ocs-prolog/main.c \
@@ -325,19 +375,20 @@ gcc -Wall -Wextra -O2 \
 
 gcc -Wall -Wextra -O2 \
   -I/shared/qrmi \
-  -L/shared/qrmi/libqrmi-0.12.0 \
+  -L/shared/qrmi/libqrmi-0.20.0 \
   -Wl,-rpath,'$ORIGIN' \
   -o /shared/gridware-adapter/bin/qrmi-ocs-epilog \
   /shared/gridware-adapter/src/cmd/qrmi-ocs-epilog/main.c \
   -lqrmi
 
-cp /shared/qrmi/libqrmi-0.12.0/libqrmi.so /shared/gridware-adapter/bin/
+cp /shared/qrmi/libqrmi-0.20.0/libqrmi.so /shared/gridware-adapter/bin/
 ```
 
 Hook behavior:
 
 - Prolog reads granted scheduler resource, resolves one backend name, acquires QRMI token, and writes runtime variables into the job environment.
-- Prolog requires `SGE_HGR_<resource>` or `SGE_SGR_<resource>` to be available in the prolog environment.
+- Prolog reads the dispatched job's resource list from the administrator-configured `qstat -j` command.
+- Acquisition metadata is stored only in the scheduler-owned job spool.
 - Epilog reads acquisition metadata and releases tokens.
 - Epilog expects exactly one metadata record; multiple records are treated as an error.
 - Prolog publishes runtime `qrmi_*` values in the job environment.
@@ -355,15 +406,15 @@ Hook behavior:
   - `qrmi_release_failed`: number of failed releases in epilog.
   - `qrmi_release_elapsed_seconds`: epilog release-loop elapsed time.
   - `qrmi_epilog_status_code`: epilog outcome as numeric code (`1` success, `0` error).
-- If `RUST_LOG` is unset, prolog derives it from `QRMI_OCS_LOG_LEVEL` (or `SGE_DEBUG_LEVEL`) using:
-  - `2 -> error`, `3 -> info`, `4 -> debug`, `>=5 -> trace`
+- `RUST_LOG` comes from `--hook-log-level` (names, or SGE debug levels mapped as
+  `2 -> error`, `3 -> info`, `4 -> debug`, `>=5 -> trace`), not from the job environment.
 
 ### Behavior vs SPANK Plugin
 
 This Gridware/OCS adapter mirrors core SPANK behavior in these areas:
 
 - Loads backend settings from `qrmi_config.json` and exports backend-prefixed `QRMI_*` variables.
-- Sets `RUST_LOG` from scheduler debug level mapping when `RUST_LOG` is not already set.
+- Sets `RUST_LOG` from the administrator's `--hook-log-level`.
 - Exports `QRMI_JOB_QPU_RESOURCES` and `QRMI_JOB_QPU_TYPES` for runtime compatibility.
 - Acquires in prolog and releases in epilog.
 
@@ -406,7 +457,7 @@ CGO_ENABLED=1 \
 
 ## Additional Notes
 
-- QRMI runtime config is expected at `/etc/slurm/qrmi_config.json` on submit and execution hosts.
+- QRMI runtime config is expected at `/etc/qrmi/qrmi_config.json` on submit and execution hosts.
 - OCS quickinstall containers should provide both `python3` and `python` commands.
 
 ## License

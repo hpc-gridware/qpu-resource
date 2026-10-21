@@ -4,18 +4,30 @@
 #define _GNU_SOURCE
 
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
+#include <pwd.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
 #include "qrmi.h"
 
 #define METADATA_FILENAME "qrmi_ocs_acquired.tsv"
+#define DEFAULT_QRMI_CONFIG_PATH "/etc/qrmi/qrmi_config.json"
+#define TRUSTED_PATH "/usr/sbin:/usr/bin:/sbin:/bin"
+
+#if defined(QRMI_HAS_LOG_CALLBACK) ||                                                \
+    (defined(QRMI_VERSION) && defined(QRMI_VERSION_NUMERIC) &&                       \
+     QRMI_VERSION >= QRMI_VERSION_NUMERIC(0, 20, 0))
+#define QRMI_OCS_HAS_LOG_CALLBACK 1
+#endif
 
 typedef struct {
     char *name;
@@ -33,7 +45,25 @@ static void log_line(FILE *stream, const char *level, const char *fmt, ...) {
     va_end(args);
 }
 
-#if defined(QRMI_VERSION) && QRMI_VERSION >= QRMI_VERSION_NUMERIC(0,18,0)
+static FILE *open_append_private(const char *path) {
+    int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0600);
+    if (fd < 0) {
+        return NULL;
+    }
+    if (fchmod(fd, 0600) != 0) {
+        int chmod_errno = errno;
+        close(fd);
+        errno = chmod_errno;
+        return NULL;
+    }
+    FILE *file = fdopen(fd, "a");
+    if (file == NULL) {
+        close(fd);
+    }
+    return file;
+}
+
+#if defined(QRMI_OCS_HAS_LOG_CALLBACK)
 static void log_qrmi_line(const char *level, const char *target, const char *message) {
     const char *log_level = level == NULL ? "INFO" : level;
     const char *log_target = target == NULL ? "qrmi" : target;
@@ -61,49 +91,18 @@ static char *dup_text(const char *src) {
 }
 
 static int resolve_metadata_path(char *path, size_t size) {
-    const char *forced = getenv("QRMI_OCS_METADATA_PATH");
     const char *spool;
-    const char *job_id;
-
-    if (forced != NULL && *forced != '\0') {
-        if (snprintf(path, size, "%s", forced) >= (int)size) {
-            return -1;
-        }
-        return 0;
-    }
 
     spool = getenv("SGE_JOB_SPOOL_DIR");
-    if (spool != NULL && *spool != '\0') {
-        if (snprintf(path, size, "%s/%s", spool, METADATA_FILENAME) >= (int)size) {
-            return -1;
-        }
-        return 0;
-    }
-
-    job_id = getenv("JOB_ID");
-    if (job_id != NULL && *job_id != '\0') {
-        if (snprintf(path, size, "/tmp/qrmi_ocs_%s.tsv", job_id) >= (int)size) {
-            return -1;
-        }
-        return 0;
-    }
-
-    if (snprintf(path, size, "/tmp/qrmi_ocs_acquired.tsv") >= (int)size) {
+    if (spool == NULL || *spool == '\0' ||
+        snprintf(path, size, "%s/%s", spool, METADATA_FILENAME) >= (int)size) {
         return -1;
     }
     return 0;
 }
 
 static int resolve_job_env_path(char *path, size_t size) {
-    const char *job_env = getenv("SGE_JOB_ENV");
     const char *spool;
-
-    if (job_env != NULL && *job_env != '\0') {
-        if (snprintf(path, size, "%s", job_env) >= (int)size) {
-            return -1;
-        }
-        return 0;
-    }
 
     spool = getenv("SGE_JOB_SPOOL_DIR");
     if (spool == NULL || *spool == '\0') {
@@ -236,12 +235,142 @@ static int parse_record_line(char *line, AcquiredRecord *record) {
     return 0;
 }
 
+/* The variables OCS sets for the epilog itself; see the prolog. */
+static const char *const trusted_env_keys[] = {
+    "SGE_ROOT", "SGE_CELL", "SGE_QMASTER_PORT", "SGE_EXECD_PORT",
+    "SGE_JOB_SPOOL_DIR", "JOB_ID", "SGE_TASK_ID", "TZ",
+};
+#define TRUSTED_ENV_COUNT (sizeof(trusted_env_keys) / sizeof(trusted_env_keys[0]))
+
+/* has_loader_env reports dynamic-loader variables. qrmi-ocs-launch removes
+ * them before starting the hook; finding one means the hook was started
+ * without it, after the loader had already read them.
+ */
+static bool has_loader_env(void) {
+    extern char **environ;
+    char **kv;
+
+    for (kv = environ; kv != NULL && *kv != NULL; kv++) {
+        if (strncmp(*kv, "LD_", 3) == 0 || strncmp(*kv, "GLIBC_TUNABLES=", 15) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* reset_process_env keeps only the OCS-set variables and sets a fixed PATH,
+ * the hook user's HOME and the C locale, so QRMI does not read job-provided
+ * settings. qrmi-ocs-launch does the same before the hook starts.
+ */
+static int reset_process_env(void) {
+    char *saved[TRUSTED_ENV_COUNT];
+    size_t i;
+    int rc = 0;
+
+    for (i = 0; i < TRUSTED_ENV_COUNT; i++) {
+        const char *value = getenv(trusted_env_keys[i]);
+        saved[i] = value == NULL ? NULL : strdup(value);
+    }
+    if (clearenv() != 0) {
+        rc = -1;
+    }
+    for (i = 0; i < TRUSTED_ENV_COUNT; i++) {
+        if (saved[i] != NULL && setenv(trusted_env_keys[i], saved[i], 1) != 0) {
+            rc = -1;
+        }
+        free(saved[i]);
+    }
+    {
+        struct passwd *account = getpwuid(geteuid());
+        const char *home = account != NULL && account->pw_dir != NULL && account->pw_dir[0] == '/'
+                               ? account->pw_dir
+                               : "/";
+        if (setenv("PATH", TRUSTED_PATH, 1) != 0 || setenv("HOME", home, 1) != 0 ||
+            setenv("LANG", "C", 1) != 0 || setenv("LC_ALL", "C", 1) != 0) {
+            rc = -1;
+        }
+    }
+    return rc;
+}
+
+static int set_prefixed_env(const char *prefix, const char *key, const char *value) {
+    char name[512];
+
+    if (snprintf(name, sizeof(name), "%s_%s", prefix, key) >= (int)sizeof(name)) {
+        return -1;
+    }
+    return setenv(name, value, 1);
+}
+
+/* set_release_env rebuilds the QRMI settings the release needs from
+ * qrmi_config.json and the metadata record, as the prolog set them.
+ */
+static int set_release_env(const char *config_path, const char *job_owner, const AcquiredRecord *record) {
+    QrmiConfig *config = qrmi_config_load(config_path);
+    QrmiResourceDef *def;
+    char uid_buf[32];
+    char job_id_buf[512];
+    const char *job_id = getenv("JOB_ID");
+    const char *task_id = getenv("SGE_TASK_ID");
+    uid_t uid = getuid();
+    size_t i;
+    int rc = 0;
+
+    if (config == NULL) {
+        log_line(stderr, "ERROR", "failed to load config %s", config_path);
+        return -1;
+    }
+    def = qrmi_config_resource_def_get(config, record->name);
+    if (def == NULL) {
+        log_line(stderr, "ERROR", "resource %s not found in %s", record->name, config_path);
+        qrmi_config_free(config);
+        return -1;
+    }
+    if (job_owner != NULL && *job_owner != '\0') {
+        struct passwd *account = getpwnam(job_owner);
+        if (account == NULL) {
+            rc = -1;
+        } else {
+            uid = account->pw_uid;
+        }
+    }
+    if (job_id == NULL) {
+        job_id = "";
+    }
+    if (task_id != NULL && *task_id != '\0' && strcmp(task_id, "undefined") != 0 &&
+        strcmp(task_id, "0") != 0) {
+        if (snprintf(job_id_buf, sizeof(job_id_buf), "%s.%s", job_id, task_id) >= (int)sizeof(job_id_buf)) {
+            rc = -1;
+        }
+        job_id = job_id_buf;
+    }
+    if (rc != 0 || snprintf(uid_buf, sizeof(uid_buf), "%u", (unsigned int)uid) >= (int)sizeof(uid_buf) ||
+        setenv("QRMI_JOB_UID", uid_buf, 1) != 0 || setenv("QRMI_JOB_ID", job_id, 1) != 0 ||
+        set_prefixed_env(record->name, "QRMI_JOB_ACQUISITION_TOKEN", record->token) != 0) {
+        rc = -1;
+    }
+    for (i = 0; rc == 0 && i < def->environments.length; i++) {
+        const char *key = def->environments.variables[i].key;
+        const char *value = def->environments.variables[i].value;
+        if (key != NULL && *key != '\0' && value != NULL &&
+            set_prefixed_env(record->name, key, value) != 0) {
+            rc = -1;
+        }
+    }
+    qrmi_config_resource_def_free(def);
+    qrmi_config_free(config);
+    return rc;
+}
+
 /* release_record releases exactly one acquired token described by metadata. */
-static int release_record(const AcquiredRecord *record) {
+static int release_record(const char *config_path, const char *job_owner, const AcquiredRecord *record) {
     QrmiQuantumResource *qrmi;
     QrmiReturnCode rc;
 
     if (record == NULL) {
+        return -1;
+    }
+    if (set_release_env(config_path, job_owner, record) != 0) {
         return -1;
     }
 
@@ -268,7 +397,18 @@ static int release_record(const AcquiredRecord *record) {
     return 0;
 }
 
-int main(void) {
+/* main exits 0 when there is nothing to release or the release was
+ * attempted. A failed release is logged, recorded in accounting and leaves
+ * the metadata file for administrator recovery: the job has finished, and a
+ * non-zero code would put the queue instance into error state. Only a
+ * missing spool directory or unreadable metadata exit 1.
+ */
+int main(int argc, char **argv) {
+    const char *config_path = DEFAULT_QRMI_CONFIG_PATH;
+    const char *log_level = NULL;
+    const char *job_owner = NULL;
+    bool metadata_error = false;
+    int arg;
     char metadata_path[PATH_MAX];
     char job_env_path[PATH_MAX];
     char usage_path[PATH_MAX];
@@ -287,7 +427,47 @@ int main(void) {
     long elapsed = 0;
     char numbuf[32];
 
-#if defined(QRMI_HAS_LOG_CALLBACK)
+    if (has_loader_env()) {
+        log_line(stderr, "ERROR", "refusing to run: LD_* or GLIBC_TUNABLES is set; start the hook through qrmi-ocs-launch");
+        return 100;
+    }
+    if (reset_process_env() != 0) {
+        log_line(stderr, "ERROR", "failed to reset the environment");
+        return 1;
+    }
+    for (arg = 1; arg < argc; arg++) {
+        if (strncmp(argv[arg], "--config=", 9) == 0) {
+            config_path = argv[arg] + 9;
+        } else if (strncmp(argv[arg], "--log-level=", 12) == 0) {
+            log_level = argv[arg] + 12;
+        } else if (argv[arg][0] == '-' || job_owner != NULL) {
+            log_line(stderr, "ERROR", "invalid epilog argument: %s", argv[arg]);
+            return 1;
+        } else {
+            job_owner = argv[arg];
+        }
+    }
+    if (log_level != NULL && *log_level != '\0') {
+        /* Same mapping as the prolog: SGE debug levels or RUST_LOG names. */
+        static const char *const names[] = {"error", "warn", "info", "debug", "trace"};
+        char *end;
+        long level = strtol(log_level, &end, 10);
+        const char *rust = NULL;
+        size_t n;
+        if (end != log_level && *end == '\0') {
+            rust = level <= 2 ? "error" : level == 3 ? "info" : level == 4 ? "debug" : "trace";
+        }
+        for (n = 0; rust == NULL && n < sizeof(names) / sizeof(names[0]); n++) {
+            if (strcasecmp(log_level, names[n]) == 0) {
+                rust = names[n];
+            }
+        }
+        if (rust != NULL) {
+            (void)setenv("RUST_LOG", rust, 1);
+        }
+    }
+
+#if defined(QRMI_OCS_HAS_LOG_CALLBACK)
     qrmi_log_callback_set(log_qrmi_line);
 #endif
 
@@ -307,7 +487,7 @@ int main(void) {
     }
 
     if (resolve_job_env_path(job_env_path, sizeof(job_env_path)) == 0) {
-        job_env = fopen(job_env_path, "a");
+        job_env = open_append_private(job_env_path);
         if (job_env == NULL) {
             log_line(stderr, "WARN", "failed to open job env file %s: %s", job_env_path, strerror(errno));
         }
@@ -322,7 +502,8 @@ int main(void) {
             total = 1;
             if (parse_record_line(line, &record) != 0) {
                 failed = 1;
-                log_line(stderr, "ERROR", "failed to parse metadata line: %s", line);
+                metadata_error = true;
+                log_line(stderr, "ERROR", "failed to parse metadata line");
                 break;
             }
             have_record = true;
@@ -330,12 +511,13 @@ int main(void) {
         }
         extra_record = true;
         failed = 1;
+        metadata_error = true;
         log_line(stderr, "ERROR", "metadata file has more than one record; unsupported");
         break;
     }
 
     if (failed == 0 && have_record) {
-        if (release_record(&record) == 0) {
+        if (release_record(config_path, job_owner, &record) == 0) {
             released = 1;
         } else {
             failed = 1;
@@ -343,6 +525,7 @@ int main(void) {
     }
     if (failed == 0 && !have_record) {
         failed = 1;
+        metadata_error = true;
         log_line(stderr, "ERROR", "metadata file does not contain a record");
     }
 
@@ -350,8 +533,12 @@ int main(void) {
     free_record(&record);
     fclose(metadata);
     metadata = NULL;
-    if (unlink(metadata_path) != 0 && errno != ENOENT) {
-        log_line(stderr, "WARN", "failed to remove metadata file %s: %s", metadata_path, strerror(errno));
+    if (failed == 0) {
+        if (unlink(metadata_path) != 0 && errno != ENOENT) {
+            log_line(stderr, "WARN", "failed to remove metadata file %s: %s", metadata_path, strerror(errno));
+        }
+    } else {
+        log_line(stderr, "WARN", "retaining metadata file %s for administrator recovery", metadata_path);
     }
 
     elapsed = (long)(time(NULL) - start_ts);
@@ -405,5 +592,5 @@ int main(void) {
              failed,
              extra_record ? "true" : "false",
              elapsed);
-    return failed == 0 ? 0 : 1;
+    return metadata_error ? 1 : 0;
 }

@@ -1,21 +1,52 @@
 // Copyright 2026 Pasqal and its contributors
 // SPDX-License-Identifier: Apache-2.0
 
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #include <ctype.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
+#include <pwd.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "qrmi.h"
 
-#define DEFAULT_QRMI_CONFIG_PATH "/etc/slurm/qrmi_config.json"
+#define DEFAULT_QRMI_CONFIG_PATH "/etc/qrmi/qrmi_config.json"
 #define DEFAULT_RESOURCE_NAME "qpu"
+#define DEFAULT_SLOTS_RESOURCE_NAME "qpu_slots"
 #define METADATA_FILENAME "qrmi_ocs_acquired.tsv"
+#define TRUSTED_PATH "/usr/sbin:/usr/bin:/sbin:/bin"
+
+/* Exit codes OCS interprets for queue prologs: 99 reschedules the job, 100
+ * puts the job into error state, any other non-zero code puts the queue
+ * instance into error state.
+ */
+#define EXIT_HOST_ERROR 1
+#define EXIT_RESCHEDULE 99
+#define EXIT_JOB_ERROR 100
+
+/* Results of reading scheduler state. */
+#define LOOKUP_FOUND 0
+#define LOOKUP_NOT_FOUND 1
+#define LOOKUP_HOST_ERROR (-1)
+#define LOOKUP_RETRY (-2)
+
+#if defined(QRMI_HAS_LOG_CALLBACK) ||                                                \
+    (defined(QRMI_VERSION) && defined(QRMI_VERSION_NUMERIC) &&                       \
+     QRMI_VERSION >= QRMI_VERSION_NUMERIC(0, 20, 0))
+#define QRMI_OCS_HAS_LOG_CALLBACK 1
+#endif
 
 typedef struct {
     char *name;
@@ -33,7 +64,299 @@ static void log_line(FILE *stream, const char *level, const char *fmt, ...) {
     va_end(args);
 }
 
-#if defined(QRMI_VERSION) && QRMI_VERSION >= QRMI_VERSION_NUMERIC(0,18,0)
+static FILE *open_append_private(const char *path) {
+    int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0600);
+    if (fd < 0) {
+        return NULL;
+    }
+    if (fchmod(fd, 0600) != 0) {
+        int chmod_errno = errno;
+        close(fd);
+        errno = chmod_errno;
+        return NULL;
+    }
+    FILE *file = fdopen(fd, "a");
+    if (file == NULL) {
+        close(fd);
+    }
+    return file;
+}
+
+/* The variables qrmi-ocs-launch sets for the prolog (TZ only when it is a
+ * plain time zone name). Everything else in the prolog's environment,
+ * including PATH, can come from the job.
+ */
+static const char *const trusted_env_keys[] = {
+    "SGE_ROOT", "SGE_CELL", "SGE_QMASTER_PORT", "SGE_EXECD_PORT",
+    "SGE_JOB_SPOOL_DIR", "JOB_ID", "SGE_TASK_ID", "TZ",
+};
+#define TRUSTED_ENV_COUNT (sizeof(trusted_env_keys) / sizeof(trusted_env_keys[0]))
+
+/* has_loader_env reports dynamic-loader variables. qrmi-ocs-launch removes
+ * them before starting the hook; finding one means the hook was started
+ * without it, after the loader had already read them.
+ */
+static bool has_loader_env(void) {
+    extern char **environ;
+    char **kv;
+
+    for (kv = environ; kv != NULL && *kv != NULL; kv++) {
+        if (strncmp(*kv, "LD_", 3) == 0 || strncmp(*kv, "GLIBC_TUNABLES=", 15) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* reset_process_env keeps only the OCS-set variables and sets a fixed PATH,
+ * the hook user's HOME and the C locale. The prolog runs as the OCS admin
+ * user (root by default) with the job's environment, so QRMI and qstat must
+ * not read job-provided values; backend settings come from qrmi_config.json.
+ * qrmi-ocs-launch does the same before the hook starts.
+ */
+static int reset_process_env(void) {
+    char *saved[TRUSTED_ENV_COUNT];
+    size_t i;
+    int rc = 0;
+
+    for (i = 0; i < TRUSTED_ENV_COUNT; i++) {
+        const char *value = getenv(trusted_env_keys[i]);
+        saved[i] = value == NULL ? NULL : strdup(value);
+    }
+    if (clearenv() != 0) {
+        rc = -1;
+    }
+    for (i = 0; i < TRUSTED_ENV_COUNT; i++) {
+        if (saved[i] != NULL && setenv(trusted_env_keys[i], saved[i], 1) != 0) {
+            rc = -1;
+        }
+        free(saved[i]);
+    }
+    {
+        struct passwd *account = getpwuid(geteuid());
+        const char *home = account != NULL && account->pw_dir != NULL && account->pw_dir[0] == '/'
+                               ? account->pw_dir
+                               : "/";
+        if (setenv("PATH", TRUSTED_PATH, 1) != 0 || setenv("HOME", home, 1) != 0 ||
+            setenv("LANG", "C", 1) != 0 || setenv("LC_ALL", "C", 1) != 0) {
+            rc = -1;
+        }
+    }
+    return rc;
+}
+
+/* check_trusted_executable requires an absolute path to a root-owned regular
+ * file that group and others cannot write. The test harness defines
+ * QRMI_OCS_TEST_TRUST_ANY_EXECUTABLE to run fake scheduler commands.
+ */
+#ifdef QRMI_OCS_TEST_TRUST_ANY_EXECUTABLE
+static int check_trusted_executable(const char *path) {
+    return path != NULL && path[0] == '/' ? 0 : -1;
+}
+#else
+static int check_trusted_executable(const char *path) {
+    char resolved[PATH_MAX];
+    struct stat st;
+
+    if (path == NULL || path[0] != '/' || realpath(path, resolved) == NULL ||
+        stat(resolved, &st) != 0) {
+        return -1;
+    }
+    if (!S_ISREG(st.st_mode) || st.st_uid != 0 || (st.st_mode & 022) != 0) {
+        return -1;
+    }
+    return 0;
+}
+#endif
+
+/* run_scheduler_command runs a trusted OCS client command and returns its
+ * standard output. LOOKUP_RETRY means the command failed, for example because
+ * qmaster was briefly unreachable.
+ */
+static int run_scheduler_command(const char *path, const char *arg1, const char *arg2, char **out) {
+    int output_pipe[2];
+    pid_t pid;
+    char *buf = NULL;
+    size_t len = 0;
+    size_t cap = 0;
+    char chunk[4096];
+    ssize_t got;
+    int status;
+
+    *out = NULL;
+    if (check_trusted_executable(path) != 0) {
+        return LOOKUP_HOST_ERROR;
+    }
+    if (pipe(output_pipe) != 0) {
+        return LOOKUP_HOST_ERROR;
+    }
+    pid = fork();
+    if (pid < 0) {
+        close(output_pipe[0]);
+        close(output_pipe[1]);
+        return LOOKUP_HOST_ERROR;
+    }
+    if (pid == 0) {
+        close(output_pipe[0]);
+        if (dup2(output_pipe[1], STDOUT_FILENO) < 0) {
+            _exit(127);
+        }
+        close(output_pipe[1]);
+        execl(path, path, arg1, arg2, (char *)NULL);
+        _exit(127);
+    }
+    close(output_pipe[1]);
+    while ((got = read(output_pipe[0], chunk, sizeof(chunk))) > 0) {
+        if (len + (size_t)got + 1 > cap) {
+            size_t next_cap = (len + (size_t)got + 1) * 2;
+            char *next = (char *)realloc(buf, next_cap);
+            if (next == NULL) {
+                free(buf);
+                close(output_pipe[0]);
+                waitpid(pid, &status, 0);
+                return LOOKUP_HOST_ERROR;
+            }
+            buf = next;
+            cap = next_cap;
+        }
+        memcpy(buf + len, chunk, (size_t)got);
+        len += (size_t)got;
+    }
+    close(output_pipe[0]);
+    if (waitpid(pid, &status, 0) < 0 || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        free(buf);
+        return LOOKUP_RETRY;
+    }
+    if (buf == NULL) {
+        buf = (char *)calloc(1, 1);
+        if (buf == NULL) {
+            return LOOKUP_HOST_ERROR;
+        }
+    }
+    buf[len] = '\0';
+    *out = buf;
+    return LOOKUP_FOUND;
+}
+
+/* field_value returns the value of the first line starting with field, joined
+ * with its continuation lines (indented, or after a trailing backslash), with
+ * backslashes removed. A field without a trailing colon, as in qconf output,
+ * must be followed by whitespace. The caller frees the result.
+ */
+static char *field_value(const char *text, const char *field) {
+    size_t field_len = strlen(field);
+    bool colon = field_len > 0 && field[field_len - 1] == ':';
+    const char *line = text;
+    char *value = NULL;
+    size_t len = 0;
+    bool collecting = false;
+
+    while (line != NULL && *line != '\0') {
+        const char *end = strchr(line, '\n');
+        size_t line_len = end == NULL ? strlen(line) : (size_t)(end - line);
+        const char *part = NULL;
+        size_t part_len = 0;
+
+        if (!collecting) {
+            if (line_len >= field_len && strncmp(line, field, field_len) == 0 &&
+                (colon || line_len == field_len || line[field_len] == ' ' || line[field_len] == '\t')) {
+                collecting = true;
+                part = line + field_len;
+                part_len = line_len - field_len;
+            }
+        } else if (line_len > 0 && (line[0] == ' ' || line[0] == '\t')) {
+            part = line;
+            part_len = line_len;
+        } else {
+            break;
+        }
+        if (part != NULL) {
+            char *next = (char *)realloc(value, len + part_len + 1);
+            size_t i;
+            if (next == NULL) {
+                free(value);
+                return NULL;
+            }
+            value = next;
+            for (i = 0; i < part_len; i++) {
+                if (part[i] != '\\' && !isspace((unsigned char)part[i])) {
+                    value[len++] = part[i];
+                }
+            }
+            value[len] = '\0';
+        }
+        line = end == NULL ? NULL : end + 1;
+    }
+    return value;
+}
+
+static int scheduler_job_uid(const char *job_owner, uid_t *uid) {
+    struct passwd *account;
+
+    if (job_owner == NULL || *job_owner == '\0') {
+        *uid = getuid();
+        return 0;
+    }
+    account = getpwnam(job_owner);
+    if (account == NULL) {
+        return -1;
+    }
+    *uid = account->pw_uid;
+    return 0;
+}
+
+static int set_runtime_env(FILE *job_env, const char *key, const char *value, bool export_to_job);
+static int read_job_requested_resource(const char *resource_name,
+                                       const char *qstat_path,
+                                       char **value_out);
+
+static int export_scheduler_slots(FILE *job_env,
+                                  const char *resource_name,
+                                  const char *qstat_path) {
+    const char *raw;
+    char *requested = NULL;
+    char *end;
+    double value;
+    int slots;
+    char slots_buf[32];
+
+    int requested_rc = read_job_requested_resource(resource_name, qstat_path, &requested);
+    if (requested_rc != LOOKUP_FOUND) {
+        return requested_rc == LOOKUP_NOT_FOUND ? 0 : -1;
+    }
+    raw = requested;
+    errno = 0;
+    value = strtod(raw, &end);
+    while (isspace((unsigned char)*end)) {
+        end++;
+    }
+    if (*end == '(') {
+        while (*end != '\0' && *end != ')') {
+            end++;
+        }
+        if (*end == ')') {
+            end++;
+        }
+        while (isspace((unsigned char)*end)) {
+            end++;
+        }
+    }
+    if (errno != 0 || *end != '\0' || value != value || value < 1 || value > INT_MAX) {
+        free(requested);
+        return -1;
+    }
+    slots = (int)value;
+    if (value != (double)slots ||
+        snprintf(slots_buf, sizeof(slots_buf), "%d", slots) >= (int)sizeof(slots_buf)) {
+        free(requested);
+        return -1;
+    }
+    int result = set_runtime_env(job_env, "QRMI_JOB_QPU_SLOTS", slots_buf, true);
+    free(requested);
+    return result;
+}
+
+#if defined(QRMI_OCS_HAS_LOG_CALLBACK)
 static void log_qrmi_line(const char *level, const char *target, const char *message) {
     const char *log_level = level == NULL ? "INFO" : level;
     const char *log_target = target == NULL ? "qrmi" : target;
@@ -87,6 +410,116 @@ static char *trim_token(char *token) {
     *end = '\0';
 
     return start;
+}
+
+static char *trim_spaces(char *text) {
+    char *end;
+
+    while (*text != '\0' && isspace((unsigned char)*text)) {
+        text++;
+    }
+    end = text + strlen(text);
+    while (end > text && isspace((unsigned char)*(end - 1))) {
+        end--;
+    }
+    *end = '\0';
+    return text;
+}
+
+static char *resource_from_list(char *list, const char *resource_name) {
+    char *save = NULL;
+    char *item;
+
+    for (item = strtok_r(list, ",", &save); item != NULL; item = strtok_r(NULL, ",", &save)) {
+        char *eq = strchr(item, '=');
+        char *key;
+        char *value;
+        if (eq == NULL) {
+            continue;
+        }
+        *eq = '\0';
+        key = trim_spaces(item);
+        value = trim_spaces(eq + 1);
+        if (strcmp(key, resource_name) == 0 && *value != '\0') {
+            return dup_text(value);
+        }
+    }
+    return NULL;
+}
+
+/* read_job_requested_resource reads the job's hard request for resource_name
+ * from qstat -j. OCS does not enforce soft requests, so a soft value could
+ * name a backend the host does not offer. master_hard_resource_list holds the
+ * master task's hard requests of a parallel job submitted with -scope master;
+ * the prolog runs for the master task. Returns LOOKUP_*.
+ */
+static int read_job_requested_resource(const char *resource_name,
+                                       const char *qstat_path,
+                                       char **value_out) {
+    static const char *const fields[] = {"hard_resource_list:", "master_hard_resource_list:"};
+    const char *job_id = getenv("JOB_ID");
+    char *output = NULL;
+    size_t i;
+    int rc;
+
+    *value_out = NULL;
+    if (job_id == NULL || *job_id == '\0') {
+        return LOOKUP_HOST_ERROR;
+    }
+    rc = run_scheduler_command(qstat_path, "-j", job_id, &output);
+    if (rc != LOOKUP_FOUND) {
+        return rc;
+    }
+    for (i = 0; i < sizeof(fields) / sizeof(fields[0]) && *value_out == NULL; i++) {
+        char *list = field_value(output, fields[i]);
+        if (list != NULL) {
+            *value_out = resource_from_list(list, resource_name);
+            free(list);
+        }
+    }
+    free(output);
+    return *value_out == NULL ? LOOKUP_NOT_FOUND : LOOKUP_FOUND;
+}
+
+/* check_host_offers confirms that this execution host's complex_values offer
+ * the requested backend, so a job can only use the backend the scheduler
+ * matched it to. qconf is expected next to qstat. Returns 0, or an exit code.
+ */
+static int check_host_offers(const char *qstat_path, const char *resource_name, const char *backend) {
+    char qconf_path[PATH_MAX];
+    char host[256];
+    const char *slash = strrchr(qstat_path, '/');
+    char *output = NULL;
+    char *list;
+    char *offered;
+    int rc;
+
+    if (slash == NULL ||
+        snprintf(qconf_path, sizeof(qconf_path), "%.*s/qconf", (int)(slash - qstat_path), qstat_path) >=
+            (int)sizeof(qconf_path) ||
+        gethostname(host, sizeof(host)) != 0) {
+        return EXIT_HOST_ERROR;
+    }
+    host[sizeof(host) - 1] = '\0';
+    rc = run_scheduler_command(qconf_path, "-se", host, &output);
+    if (rc != LOOKUP_FOUND && strchr(host, '.') != NULL) {
+        *strchr(host, '.') = '\0';
+        rc = run_scheduler_command(qconf_path, "-se", host, &output);
+    }
+    if (rc != LOOKUP_FOUND) {
+        log_line(stderr, "ERROR", "qconf -se %s failed", host);
+        return rc == LOOKUP_RETRY ? EXIT_RESCHEDULE : EXIT_HOST_ERROR;
+    }
+    list = field_value(output, "complex_values");
+    free(output);
+    offered = list == NULL ? NULL : resource_from_list(list, resource_name);
+    free(list);
+    rc = offered != NULL && strcmp(offered, backend) == 0 ? 0 : EXIT_JOB_ERROR;
+    if (rc != 0) {
+        log_line(stderr, "ERROR", "host %s does not offer %s=%s", host, resource_name, backend);
+    }
+    free(offered);
+    return rc;
 }
 
 static bool text_equals_ignore_case_span(const char *text, size_t text_len, const char *literal) {
@@ -225,15 +658,7 @@ static int parse_granted_backend(const char *granted, char **backend_name) {
 }
 
 static int resolve_job_env_path(char *path, size_t size) {
-    const char *job_env = getenv("SGE_JOB_ENV");
     const char *spool;
-
-    if (job_env != NULL && *job_env != '\0') {
-        if (snprintf(path, size, "%s", job_env) >= (int)size) {
-            return -1;
-        }
-        return 0;
-    }
 
     spool = getenv("SGE_JOB_SPOOL_DIR");
     if (spool == NULL || *spool == '\0') {
@@ -246,38 +671,13 @@ static int resolve_job_env_path(char *path, size_t size) {
     return 0;
 }
 
-/* resolve_metadata_path chooses where prolog writes acquisition records for
- * epilog release. Priority: explicit env override, job spool dir, then /tmp.
- */
+/* resolve_metadata_path keeps credentials in the scheduler-owned job spool. */
 static int resolve_metadata_path(char *path, size_t size) {
-    const char *forced = getenv("QRMI_OCS_METADATA_PATH");
     const char *spool;
-    const char *job_id;
-
-    if (forced != NULL && *forced != '\0') {
-        if (snprintf(path, size, "%s", forced) >= (int)size) {
-            return -1;
-        }
-        return 0;
-    }
 
     spool = getenv("SGE_JOB_SPOOL_DIR");
-    if (spool != NULL && *spool != '\0') {
-        if (snprintf(path, size, "%s/%s", spool, METADATA_FILENAME) >= (int)size) {
-            return -1;
-        }
-        return 0;
-    }
-
-    job_id = getenv("JOB_ID");
-    if (job_id != NULL && *job_id != '\0') {
-        if (snprintf(path, size, "/tmp/qrmi_ocs_%s.tsv", job_id) >= (int)size) {
-            return -1;
-        }
-        return 0;
-    }
-
-    if (snprintf(path, size, "/tmp/qrmi_ocs_acquired.tsv") >= (int)size) {
+    if (spool == NULL || *spool == '\0' ||
+        snprintf(path, size, "%s/%s", spool, METADATA_FILENAME) >= (int)size) {
         return -1;
     }
     return 0;
@@ -307,27 +707,16 @@ static int set_runtime_env(FILE *job_env, const char *key, const char *value, bo
     return 0;
 }
 
-/* apply_default_rust_log maps scheduler/admin debug levels to RUST_LOG only
- * when RUST_LOG is not already set by submit/admin configuration.
+/* apply_rust_log maps the hook's --log-level value to RUST_LOG for QRMI and
+ * the job. The level comes from the queue's hook command line, not from the
+ * job environment.
  */
-static int apply_default_rust_log(FILE *job_env) {
-    const char *current = getenv("RUST_LOG");
-    const char *candidate = NULL;
-    const char *level = NULL;
+static int apply_rust_log(FILE *job_env, const char *log_level) {
+    const char *level = resolve_rust_log_level(log_level);
 
-    if (current != NULL && *current != '\0') {
-        return 0;
-    }
-
-    candidate = getenv("QRMI_OCS_LOG_LEVEL");
-    if (candidate == NULL || *candidate == '\0') {
-        candidate = getenv("SGE_DEBUG_LEVEL");
-    }
-    level = resolve_rust_log_level(candidate);
     if (level == NULL) {
         return 0;
     }
-
     return set_runtime_env(job_env, "RUST_LOG", level, true);
 }
 
@@ -416,11 +805,17 @@ static void free_acquired_resources(AcquiredResource *resources, size_t count) {
     free(resources);
 }
 
-int main(void) {
-    const char *config_path;
-    const char *resource_name;
-    char hard_grant_env[256];
+int main(int argc, char **argv) {
+    const char *config_path = DEFAULT_QRMI_CONFIG_PATH;
+    const char *resource_name = DEFAULT_RESOURCE_NAME;
+    const char *slots_resource_name = DEFAULT_SLOTS_RESOURCE_NAME;
+    const char *qstat_path = NULL;
+    const char *log_level = NULL;
+    const char *job_owner = NULL;
     const char *granted = NULL;
+    int lookup_rc;
+    int exit_code = EXIT_HOST_ERROR;
+    char *requested_grant = NULL;
     char *backend_name = NULL;
 
     QrmiConfig *config = NULL;
@@ -437,51 +832,73 @@ int main(void) {
     char metadata_path[PATH_MAX];
     FILE *metadata_file = NULL;
     char count_buf[32];
+    char uid_buf[32];
+    uid_t job_uid;
+    const char *job_id;
+    const char *task_id;
+    char scheduler_job_id[512];
 
     size_t i;
-    config_path = getenv("QRMI_OCS_CONFIG_PATH");
-    if (config_path == NULL || *config_path == '\0') {
-        config_path = DEFAULT_QRMI_CONFIG_PATH;
+    if (has_loader_env()) {
+        log_line(stderr, "ERROR", "refusing to run: LD_* or GLIBC_TUNABLES is set; start the hook through qrmi-ocs-launch");
+        return EXIT_JOB_ERROR;
     }
-
-    resource_name = getenv("QRMI_OCS_RESOURCE_NAME");
-    if (resource_name == NULL || *resource_name == '\0') {
-        resource_name = DEFAULT_RESOURCE_NAME;
+    if (reset_process_env() != 0) {
+        log_line(stderr, "ERROR", "failed to reset the environment");
+        return EXIT_HOST_ERROR;
     }
-
-    if (snprintf(hard_grant_env, sizeof(hard_grant_env), "SGE_HGR_%s", resource_name) >=
-        (int)sizeof(hard_grant_env)) {
-        log_line(stderr, "ERROR", "resource name too long: %s", resource_name);
+    for (i = 1; i < (size_t)argc; i++) {
+        if (strncmp(argv[i], "--config=", 9) == 0) {
+            config_path = argv[i] + 9;
+        } else if (strncmp(argv[i], "--resource=", 11) == 0) {
+            resource_name = argv[i] + 11;
+        } else if (strncmp(argv[i], "--slots-resource=", 17) == 0) {
+            slots_resource_name = argv[i] + 17;
+        } else if (strncmp(argv[i], "--qstat=", 8) == 0) {
+            qstat_path = argv[i] + 8;
+        } else if (strncmp(argv[i], "--log-level=", 12) == 0) {
+            log_level = argv[i] + 12;
+        } else if (argv[i][0] == '-' || job_owner != NULL) {
+            log_line(stderr, "ERROR", "invalid prolog argument: %s", argv[i]);
+            return 1;
+        } else {
+            job_owner = argv[i];
+        }
+    }
+    if (*config_path == '\0' || *resource_name == '\0' ||
+        qstat_path == NULL || qstat_path[0] != '/') {
+        log_line(stderr, "ERROR", "config, resource, and absolute qstat path are required");
         return 1;
     }
 
-    granted = getenv(hard_grant_env);
-    if (granted == NULL || *granted == '\0') {
-        if (snprintf(hard_grant_env, sizeof(hard_grant_env), "SGE_SGR_%s", resource_name) >=
-            (int)sizeof(hard_grant_env)) {
-                log_line(stderr, "ERROR", "resource name too long: %s", resource_name);
-                return 1;
-            }
-            granted = getenv(hard_grant_env);
+    lookup_rc = read_job_requested_resource(resource_name, qstat_path, &requested_grant);
+    if (lookup_rc == LOOKUP_NOT_FOUND) {
+        log_line(stdout, "INFO", "job requests no %s resource; nothing to do", resource_name);
+        return 0;
     }
-
-    if (granted == NULL || *granted == '\0') {
-        log_line(stderr,
-                 "ERROR",
-                 "no granted value found in SGE_HGR_%s or SGE_SGR_%s",
-                 resource_name,
-                 resource_name);
-        return 1;
+    if (lookup_rc != LOOKUP_FOUND) {
+        log_line(stderr, "ERROR", "failed to read scheduler state for the job");
+        return lookup_rc == LOOKUP_RETRY ? EXIT_RESCHEDULE : EXIT_HOST_ERROR;
     }
+    granted = requested_grant;
 
     if (parse_granted_backend(granted, &backend_name) != 0) {
         log_line(stderr, "ERROR", "failed to parse granted resource value: %s", granted);
+        free(requested_grant);
         free(backend_name);
-        return 1;
+        return EXIT_JOB_ERROR;
+    }
+    free(requested_grant);
+    {
+        int host_rc = check_host_offers(qstat_path, resource_name, backend_name);
+        if (host_rc != 0) {
+            free(backend_name);
+            return host_rc;
+        }
     }
 
     if (resolve_job_env_path(job_env_path, sizeof(job_env_path)) == 0) {
-        job_env_file = fopen(job_env_path, "a");
+        job_env_file = open_append_private(job_env_path);
         if (job_env_file == NULL) {
             log_line(stderr,
                      "ERROR",
@@ -494,17 +911,47 @@ int main(void) {
     } else {
         log_line(stderr,
                  "ERROR",
-                 "unable to resolve job environment file path (SGE_JOB_ENV or SGE_JOB_SPOOL_DIR) ");
+                 "unable to resolve scheduler job environment path");
         free(backend_name);
         return 1;
     }
 
-    /* Apply default log level before loading QRMI config so downstream operations use it. */
-    if (apply_default_rust_log(job_env_file) != 0) {
+    /* Apply the log level before loading QRMI config so downstream operations use it. */
+    if (apply_rust_log(job_env_file, log_level) != 0) {
         set_plugin_error(job_env_file, "failed to set RUST_LOG");
         goto fail;
     }
-#if defined(QRMI_HAS_LOG_CALLBACK)
+    if (scheduler_job_uid(job_owner, &job_uid) != 0 ||
+        snprintf(uid_buf, sizeof(uid_buf), "%u", (unsigned int)job_uid) >= (int)sizeof(uid_buf) ||
+        set_runtime_env(job_env_file, "QRMI_JOB_UID", uid_buf, true) != 0) {
+        set_plugin_error(job_env_file, "failed to export scheduler job owner uid");
+        goto fail;
+    }
+    job_id = getenv("JOB_ID");
+    task_id = getenv("SGE_TASK_ID");
+    if (job_id == NULL || *job_id == '\0') {
+        set_plugin_error(job_env_file, "failed to export scheduler job id");
+        goto fail;
+    }
+    if (task_id != NULL && *task_id != '\0' && strcmp(task_id, "undefined") != 0 &&
+        strcmp(task_id, "0") != 0) {
+        if (snprintf(scheduler_job_id, sizeof(scheduler_job_id), "%s.%s", job_id, task_id) >=
+            (int)sizeof(scheduler_job_id)) {
+            set_plugin_error(job_env_file, "scheduler job id is too long");
+            goto fail;
+        }
+        job_id = scheduler_job_id;
+    }
+    if (set_runtime_env(job_env_file, "QRMI_JOB_ID", job_id, true) != 0) {
+        set_plugin_error(job_env_file, "failed to export scheduler job id");
+        goto fail;
+    }
+    if (*slots_resource_name != '\0' &&
+        export_scheduler_slots(job_env_file, slots_resource_name, qstat_path) != 0) {
+        set_plugin_error(job_env_file, "failed to export scheduler QPU slots");
+        goto fail;
+    }
+#if defined(QRMI_OCS_HAS_LOG_CALLBACK)
     qrmi_log_callback_set(log_qrmi_line);
 #endif
 
@@ -548,6 +995,7 @@ int main(void) {
                      config_path,
                      error_text);
             free(error_text);
+            exit_code = EXIT_JOB_ERROR;
             goto fail;
         }
 
@@ -582,6 +1030,7 @@ int main(void) {
             free(error_text);
             qrmi_resource_free(qrmi);
             qrmi_config_resource_def_free(resource_def);
+            exit_code = EXIT_RESCHEDULE;
             goto fail;
         }
 
@@ -596,6 +1045,7 @@ int main(void) {
             free(error_text);
             qrmi_resource_free(qrmi);
             qrmi_config_resource_def_free(resource_def);
+            exit_code = EXIT_RESCHEDULE;
             goto fail;
         }
 
@@ -715,7 +1165,19 @@ int main(void) {
         goto fail;
     }
 
-    metadata_file = fopen(metadata_path, "w");
+    int metadata_fd = open(metadata_path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0600);
+    if (metadata_fd >= 0) {
+        if (fchmod(metadata_fd, 0600) != 0) {
+            int chmod_errno = errno;
+            close(metadata_fd);
+            errno = chmod_errno;
+        } else {
+            metadata_file = fdopen(metadata_fd, "w");
+            if (metadata_file == NULL) {
+                close(metadata_fd);
+            }
+        }
+    }
     if (metadata_file == NULL) {
         set_plugin_error(job_env_file, "failed to open metadata file");
         log_line(stderr,
@@ -741,11 +1203,6 @@ int main(void) {
     }
     fclose(metadata_file);
     metadata_file = NULL;
-
-    if (set_runtime_env(job_env_file, "QRMI_OCS_METADATA_PATH", metadata_path, true) != 0) {
-        set_plugin_error(job_env_file, "failed to export metadata path");
-        goto fail;
-    }
 
     log_line(stdout,
              "INFO",
@@ -777,5 +1234,5 @@ fail:
         fclose(job_env_file);
     }
 
-    return 1;
+    return exit_code;
 }

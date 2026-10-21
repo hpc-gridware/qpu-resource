@@ -19,30 +19,28 @@ func TestEpilog(t *testing.T) {
 
 var _ = Describe("epilog run()", func() {
 	var (
-		spool  string
-		meta   string
-		jobEnv string
-		usage  string
+		spool string
+		meta  string
+		usage string
 	)
 
 	BeforeEach(func() {
 		spool = GinkgoT().TempDir()
 		meta = filepath.Join(spool, "qrmi_ocs_acquired.tsv")
-		jobEnv = filepath.Join(spool, "environment")
 		usage = filepath.Join(spool, "usage")
 
 		GinkgoT().Setenv("SGE_JOB_SPOOL_DIR", spool)
-		GinkgoT().Setenv("SGE_JOB_ENV", jobEnv)
-		GinkgoT().Setenv("QRMI_OCS_METADATA_PATH", "")
 	})
 
+	cfg := hookConfig{ConfigPath: "/nonexistent/qrmi_config.json"}
+
 	It("returns 0 when no metadata file exists", func() {
-		Expect(run()).To(Equal(0))
+		Expect(run(cfg)).To(Equal(0))
 	})
 
 	It("returns 1 and records error when metadata is malformed", func() {
 		Expect(os.WriteFile(meta, []byte("badline\n"), 0o644)).To(Succeed())
-		Expect(run()).To(Equal(1))
+		Expect(run(cfg)).To(Equal(1))
 
 		// usage file should record qrmi_epilog_status_code=0 (error per inverted convention)
 		data, err := os.ReadFile(usage)
@@ -53,18 +51,38 @@ var _ = Describe("epilog run()", func() {
 
 	It("returns 1 when metadata has multiple records", func() {
 		Expect(os.WriteFile(meta, []byte("a\t1\tt1\t1\nb\t1\tt2\t2\n"), 0o644)).To(Succeed())
-		Expect(run()).To(Equal(1))
+		Expect(run(cfg)).To(Equal(1))
 
 		data, err := os.ReadFile(usage)
 		Expect(err).ToNot(HaveOccurred())
 		Expect(string(data)).To(ContainSubstring("qrmi_epilog_status_code=0\n"))
 	})
 
-	It("removes the metadata file after a parse failure", func() {
+	It("retains the metadata file after a parse failure", func() {
 		Expect(os.WriteFile(meta, []byte("badline\n"), 0o644)).To(Succeed())
-		Expect(run()).To(Equal(1))
+		Expect(run(cfg)).To(Equal(1))
 
 		_, err := os.Stat(meta)
-		Expect(os.IsNotExist(err)).To(BeTrue())
+		Expect(err).ToNot(HaveOccurred())
+	})
+
+	It("exits 0 but retains the metadata file after a release failure", func() {
+		Expect(os.WriteFile(meta, []byte("PASQAL_LOCAL\t4\tsession-id\t1\n"), 0o600)).To(Succeed())
+		Expect(run(cfg)).To(Equal(0))
+
+		_, err := os.Stat(meta)
+		Expect(err).ToNot(HaveOccurred())
+		data, err := os.ReadFile(usage)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(string(data)).To(ContainSubstring("qrmi_release_failed=1\n"))
+		Expect(string(data)).To(ContainSubstring("qrmi_epilog_status_code=0\n"))
+	})
+
+	It("takes administrator settings from hook arguments", func() {
+		got, err := parseHookArgs([]string{"--config=/etc/site/qrmi.json", "--log-level=4", "alice"})
+		Expect(err).ToNot(HaveOccurred())
+		Expect(got).To(Equal(hookConfig{ConfigPath: "/etc/site/qrmi.json", LogLevel: "4", JobOwner: "alice"}))
+		_, err = parseHookArgs([]string{"alice", "bob"})
+		Expect(err).To(HaveOccurred())
 	})
 })

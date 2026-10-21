@@ -30,9 +30,13 @@ func OpenJobEnv() (*JobEnv, error) {
 	if err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("open job env %s: %w", path, err)
+	}
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("set job env permissions %s: %w", path, err)
 	}
 	return &JobEnv{path: path, f: f, w: bufio.NewWriter(f)}, nil
 }
@@ -83,24 +87,16 @@ func (e *JobEnv) Close() error {
 	return err
 }
 
-// ApplyDefaultRustLog sets RUST_LOG only if it is not already set in the
-// process environment. The candidate is taken from QRMI_OCS_LOG_LEVEL first,
-// then SGE_DEBUG_LEVEL, and is mapped via RustLogFromDebug. If neither
-// variable maps to a known level the function is a no-op so the QRMI
-// runtime applies its own default.
-func (e *JobEnv) ApplyDefaultRustLog() error {
-	if os.Getenv("RUST_LOG") != "" {
-		return nil
-	}
-	candidate := os.Getenv("QRMI_OCS_LOG_LEVEL")
-	if candidate == "" {
-		candidate = os.Getenv("SGE_DEBUG_LEVEL")
-	}
-	level, ok := RustLogFromDebug(candidate)
+// ApplyRustLog maps the hook's --log-level value to RUST_LOG for QRMI and
+// the job. An empty or unknown level is a no-op, so QRMI applies its own
+// default. The level comes from the queue's hook command line, not from
+// the job environment.
+func (e *JobEnv) ApplyRustLog(level string) error {
+	rustLevel, ok := RustLogFromDebug(level)
 	if !ok {
 		return nil
 	}
-	return e.Set("RUST_LOG", level)
+	return e.Set("RUST_LOG", rustLevel)
 }
 
 // PluginErrorKey is the env var name used to surface a prolog failure to
