@@ -102,7 +102,7 @@ library, then cgo-builds the Go binaries against it. Output is written
 under `bin/go-hooks/`:
 
 ```bash
-make build-go-hooks                    # builds against QRMI v0.20.0 by default
+make build-go-hooks                    # builds against QRMI 0.26.3 by default
 make build-go-hooks QRMI_REF=main      # builds against QRMI main
 ```
 
@@ -327,7 +327,7 @@ mkdir -p /shared/gridware-adapter/bin
 
 gcc -Wall -Wextra -O2 \
   -I/shared/qrmi \
-  -L/shared/qrmi/libqrmi-0.20.0 \
+  -L/shared/qrmi/libqrmi-0.26.3 \
   -Wl,-rpath,'$ORIGIN' \
   -o /shared/gridware-adapter/bin/qrmi-ocs-prolog \
   /shared/gridware-adapter/src/cmd/qrmi-ocs-prolog/main.c \
@@ -335,13 +335,13 @@ gcc -Wall -Wextra -O2 \
 
 gcc -Wall -Wextra -O2 \
   -I/shared/qrmi \
-  -L/shared/qrmi/libqrmi-0.20.0 \
+  -L/shared/qrmi/libqrmi-0.26.3 \
   -Wl,-rpath,'$ORIGIN' \
   -o /shared/gridware-adapter/bin/qrmi-ocs-epilog \
   /shared/gridware-adapter/src/cmd/qrmi-ocs-epilog/main.c \
   -lqrmi
 
-cp /shared/qrmi/libqrmi-0.20.0/libqrmi.so /shared/gridware-adapter/bin/
+cp /shared/qrmi/libqrmi-0.26.3/libqrmi.so /shared/gridware-adapter/bin/
 ```
 
 Hook behavior:

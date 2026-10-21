@@ -103,7 +103,7 @@ docker run --rm --user $(id -u):$(id -g) \
   -e GOPATH=/tmp/go \
   -v "$PWD":/work \
   -w /work/gridware-adapter \
-  golang:1.24 /bin/sh -lc \
+  golang:1.26 /bin/sh -lc \
   'export PATH=/usr/local/go/bin:$PATH && go build -buildvcs=false -o /work/gridware-adapter/adapter ./src/cmd/gridware-adapter'
 ```
 
@@ -127,9 +127,9 @@ image so no host-side QRMI checkout is required.
 
 ```bash
 cd /shared/gridware-adapter
-make build-go-hooks                    # builds against QRMI v0.20.0
+make build-go-hooks                    # builds against QRMI 0.26.3
 # or, to pin a different version:
-make build-go-hooks QRMI_REF=v0.20.0
+make build-go-hooks QRMI_REF=0.26.3
 ```
 
 Outputs land in `bin/go-hooks/`:
@@ -146,7 +146,7 @@ mkdir -p /shared/gridware-adapter/bin
 
 gcc -Wall -Wextra -O2 \
   -I/shared/qrmi \
-  -L/shared/qrmi/libqrmi-0.20.0 \
+  -L/shared/qrmi/libqrmi-0.26.3 \
   -Wl,-rpath,'$ORIGIN' \
   -o /shared/gridware-adapter/bin/qrmi-ocs-prolog \
   /shared/gridware-adapter/src/cmd/qrmi-ocs-prolog/main.c \
@@ -154,37 +154,43 @@ gcc -Wall -Wextra -O2 \
 
 gcc -Wall -Wextra -O2 \
   -I/shared/qrmi \
-  -L/shared/qrmi/libqrmi-0.20.0 \
+  -L/shared/qrmi/libqrmi-0.26.3 \
   -Wl,-rpath,'$ORIGIN' \
   -o /shared/gridware-adapter/bin/qrmi-ocs-epilog \
   /shared/gridware-adapter/src/cmd/qrmi-ocs-epilog/main.c \
   -lqrmi
 ```
 
-#### Copy hooks and QRMI shared lib to master
+#### Copy hooks and QRMI shared lib to the shared install volume
+
+The queue prolog and epilog run on the execution host, so every node must see
+them. `/opt/ocs` is the `ocs-install` volume shared by all quickinstall nodes;
+a path that exists only on `ocs-master` puts the worker queue instances into
+error state.
 
 For Option A, source paths are `bin/go-hooks/`. For Option B, source
-paths are `bin/qrmi-ocs-*` plus `/shared/qrmi/libqrmi-0.20.0/libqrmi.so`.
+paths are `bin/qrmi-ocs-*` plus `/shared/qrmi/libqrmi-0.26.3/libqrmi.so`.
 
 ```bash
-docker exec ocs-master /bin/bash -lc 'mkdir -p /tmp/qrmi-hooks && chown root:root /tmp/qrmi-hooks && chmod 755 /tmp/qrmi-hooks'
+docker exec ocs-master /bin/bash -lc 'mkdir -p /opt/ocs/qrmi/hooks && chown root:root /opt/ocs/qrmi/hooks && chmod 755 /opt/ocs/qrmi/hooks'
 
 # Option A (Go hooks):
-docker cp /shared/gridware-adapter/bin/go-hooks/qrmi-ocs-prolog ocs-master:/tmp/qrmi-hooks/qrmi-ocs-prolog
-docker cp /shared/gridware-adapter/bin/go-hooks/qrmi-ocs-epilog ocs-master:/tmp/qrmi-hooks/qrmi-ocs-epilog
-docker cp /shared/gridware-adapter/bin/go-hooks/libqrmi.so      ocs-master:/tmp/qrmi-hooks/libqrmi.so
+docker cp /shared/gridware-adapter/bin/go-hooks/qrmi-ocs-prolog ocs-master:/opt/ocs/qrmi/hooks/qrmi-ocs-prolog
+docker cp /shared/gridware-adapter/bin/go-hooks/qrmi-ocs-epilog ocs-master:/opt/ocs/qrmi/hooks/qrmi-ocs-epilog
+docker cp /shared/gridware-adapter/bin/go-hooks/libqrmi.so      ocs-master:/opt/ocs/qrmi/hooks/libqrmi.so
 
 # Option B (C hooks):
-# docker cp /shared/gridware-adapter/bin/qrmi-ocs-prolog ocs-master:/tmp/qrmi-hooks/qrmi-ocs-prolog
-# docker cp /shared/gridware-adapter/bin/qrmi-ocs-epilog ocs-master:/tmp/qrmi-hooks/qrmi-ocs-epilog
-# docker cp /shared/qrmi/libqrmi-0.20.0/libqrmi.so      ocs-master:/tmp/qrmi-hooks/libqrmi.so
+# docker cp /shared/gridware-adapter/bin/qrmi-ocs-prolog ocs-master:/opt/ocs/qrmi/hooks/qrmi-ocs-prolog
+# docker cp /shared/gridware-adapter/bin/qrmi-ocs-epilog ocs-master:/opt/ocs/qrmi/hooks/qrmi-ocs-epilog
+# docker cp /shared/qrmi/libqrmi-0.26.3/libqrmi.so      ocs-master:/opt/ocs/qrmi/hooks/libqrmi.so
 
-docker exec ocs-master /bin/bash -lc 'chown root:root /tmp/qrmi-hooks/qrmi-ocs-prolog /tmp/qrmi-hooks/qrmi-ocs-epilog /tmp/qrmi-hooks/libqrmi.so && chmod 755 /tmp/qrmi-hooks/qrmi-ocs-prolog /tmp/qrmi-hooks/qrmi-ocs-epilog /tmp/qrmi-hooks/libqrmi.so'
+docker exec ocs-master /bin/bash -lc 'chown root:root /opt/ocs/qrmi/hooks/qrmi-ocs-prolog /opt/ocs/qrmi/hooks/qrmi-ocs-epilog /opt/ocs/qrmi/hooks/libqrmi.so && chmod 755 /opt/ocs/qrmi/hooks/qrmi-ocs-prolog /opt/ocs/qrmi/hooks/qrmi-ocs-epilog /opt/ocs/qrmi/hooks/libqrmi.so'
 ```
 
 ### 2.4) Install `qrmi_config.json` for `EMU_FREE`
 
-Write the runtime config on all OCS nodes:
+The Go hooks read `/etc/qrmi/qrmi_config.json` by default. Write the runtime
+config on all OCS nodes:
 
 ```bash
 for c in ocs-master ocs-worker1 ocs-worker2; do
@@ -206,11 +212,14 @@ JSON"
 done
 ```
 
+For the legacy C hooks, write the same file to
+`/etc/slurm/qrmi_config.json` instead.
+
 ### 2.5) Setup QRMI support (automatic)
 
 ```bash
 docker exec ocs-master /bin/bash -lc \
-  'source /opt/ocs/default/common/settings.sh && /tmp/adapter setup-qrmi-support --hosts ocs-master,ocs-worker1,ocs-worker2 --host-value EMU_FREE --queue all.q --prolog /tmp/qrmi-hooks/qrmi-ocs-prolog --epilog /tmp/qrmi-hooks/qrmi-ocs-epilog'
+  'source /opt/ocs/default/common/settings.sh && /tmp/adapter setup-qrmi-support --hosts ocs-master,ocs-worker1,ocs-worker2 --host-value EMU_FREE --queue all.q --prolog /opt/ocs/qrmi/hooks/qrmi-ocs-prolog --epilog /opt/ocs/qrmi/hooks/qrmi-ocs-epilog --enable-qpu-slots'
 ```
 
 Verify:
@@ -277,7 +286,7 @@ docker exec ocs-master /bin/bash -lc 'chmod +x /tmp/pasqal_cloud'
 
 ```bash
 docker exec ocs-master /bin/bash -lc \
-  'source /opt/ocs/default/common/settings.sh && qsub -terse -cwd -V -q all.q@ocs-master -l qpu=EMU_FREE -o /tmp/pulser_c_ocs.out -e /tmp/pulser_c_ocs.out -b y /usr/bin/env LD_LIBRARY_PATH=/tmp/qrmi-hooks /tmp/pasqal_cloud EMU_FREE /tmp/qrmi_pulser_seq.json'
+  'source /opt/ocs/default/common/settings.sh && qsub -terse -cwd -V -q all.q@ocs-master -l qpu=EMU_FREE -o /tmp/pulser_c_ocs.out -e /tmp/pulser_c_ocs.out -b y /usr/bin/env LD_LIBRARY_PATH=/opt/ocs/qrmi/hooks /tmp/pasqal_cloud EMU_FREE /tmp/qrmi_pulser_seq.json'
 ```
 
 Inspect:
@@ -316,7 +325,7 @@ If needed, re-run `setup-qrmi-support` from section `2.5`.
 Confirm `libqrmi.so` is copied beside hook binaries:
 
 ```bash
-docker exec ocs-master /bin/bash -lc 'ls -l /tmp/qrmi-hooks'
+docker exec ocs-master /bin/bash -lc 'ls -l /opt/ocs/qrmi/hooks'
 ```
 
 ### 4.4) QRMI logs are missing or too verbose
