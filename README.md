@@ -102,7 +102,7 @@ library, then cgo-builds the Go binaries against it. Output is written
 under `bin/go-hooks/`:
 
 ```bash
-make build-go-hooks                    # builds against QRMI v0.13.3 by default
+make build-go-hooks                    # builds against QRMI v0.20.0 by default
 make build-go-hooks QRMI_REF=main      # builds against QRMI main
 ```
 
@@ -203,6 +203,16 @@ Apply all required OCS-side QRMI setup in one command:
 - set host `complex_values` to one backend name per host
 - set queue `prolog` and `epilog`
 - ensure global `reporting_params` contains `usage_patterns=qrmi:qrmi_*`
+
+The adapter installs the QRMI hooks as `root@` procedures and passes Grid
+Engine's `$job_owner` value to the prolog. This lets the hooks update the
+root-owned job spool and call administrator-only QRMI acquisition endpoints
+while the acquired session remains owned by the submitting user. Hook binaries
+and their parent directories must therefore be writable only by administrators.
+The adapter stores the QRMI config path, absolute `qstat` path, and resource names
+in the administrator-owned queue prolog command. The
+root hook does not accept those values or resource grants from the submitted
+job environment.
 
 ```bash
 ./adapter setup-qrmi-support \
@@ -317,7 +327,7 @@ mkdir -p /shared/gridware-adapter/bin
 
 gcc -Wall -Wextra -O2 \
   -I/shared/qrmi \
-  -L/shared/qrmi/libqrmi-0.12.0 \
+  -L/shared/qrmi/libqrmi-0.20.0 \
   -Wl,-rpath,'$ORIGIN' \
   -o /shared/gridware-adapter/bin/qrmi-ocs-prolog \
   /shared/gridware-adapter/src/cmd/qrmi-ocs-prolog/main.c \
@@ -325,19 +335,20 @@ gcc -Wall -Wextra -O2 \
 
 gcc -Wall -Wextra -O2 \
   -I/shared/qrmi \
-  -L/shared/qrmi/libqrmi-0.12.0 \
+  -L/shared/qrmi/libqrmi-0.20.0 \
   -Wl,-rpath,'$ORIGIN' \
   -o /shared/gridware-adapter/bin/qrmi-ocs-epilog \
   /shared/gridware-adapter/src/cmd/qrmi-ocs-epilog/main.c \
   -lqrmi
 
-cp /shared/qrmi/libqrmi-0.12.0/libqrmi.so /shared/gridware-adapter/bin/
+cp /shared/qrmi/libqrmi-0.20.0/libqrmi.so /shared/gridware-adapter/bin/
 ```
 
 Hook behavior:
 
 - Prolog reads granted scheduler resource, resolves one backend name, acquires QRMI token, and writes runtime variables into the job environment.
-- Prolog requires `SGE_HGR_<resource>` or `SGE_SGR_<resource>` to be available in the prolog environment.
+- Prolog reads the dispatched job's resource list from the administrator-configured `qstat -j` command.
+- Acquisition metadata is stored only in the scheduler-owned job spool.
 - Epilog reads acquisition metadata and releases tokens.
 - Epilog expects exactly one metadata record; multiple records are treated as an error.
 - Prolog publishes runtime `qrmi_*` values in the job environment.
@@ -406,7 +417,7 @@ CGO_ENABLED=1 \
 
 ## Additional Notes
 
-- QRMI runtime config is expected at `/etc/slurm/qrmi_config.json` on submit and execution hosts.
+- QRMI runtime config is expected at `/etc/qrmi/qrmi_config.json` on submit and execution hosts.
 - OCS quickinstall containers should provide both `python3` and `python` commands.
 
 ## License

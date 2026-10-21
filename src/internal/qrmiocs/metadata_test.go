@@ -60,9 +60,10 @@ var _ = Describe("Metadata TSV", func() {
 	})
 
 	It("errors on a non-numeric type field", func() {
-		Expect(os.WriteFile(path, []byte("a\tnope\ttok\t1\n"), 0o644)).To(Succeed())
+		Expect(os.WriteFile(path, []byte("a\tnope\tsecret-token\t1\n"), 0o644)).To(Succeed())
 		_, err := qrmiocs.ReadStrictSingle(path)
 		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).ToNot(ContainSubstring("secret-token"))
 	})
 
 	It("rejects records with embedded tabs", func() {
