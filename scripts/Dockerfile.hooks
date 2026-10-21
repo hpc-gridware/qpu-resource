@@ -62,6 +62,7 @@ ENV CGO_LDFLAGS="-L/qrmi -lqrmi -Wl,-rpath,\$ORIGIN"
 RUN go mod download
 RUN go build -tags qrmi -ldflags "-s -w" -o /out/qrmi-ocs-prolog ./src/cmd/qrmi-ocs-prolog-go
 RUN go build -tags qrmi -ldflags "-s -w" -o /out/qrmi-ocs-epilog ./src/cmd/qrmi-ocs-epilog-go
+RUN go build -tags qrmi -ldflags "-s -w" -o /out/qrmi-ocs-load-sensor ./src/cmd/qrmi-ocs-load-sensor
 RUN cp /qrmi/libqrmi.so /out/libqrmi.so
 
 # ---------- Stage 3: export artifacts to the host ----------

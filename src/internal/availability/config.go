@@ -11,7 +11,13 @@ import (
 type Config struct {
 	LoadSensor LoadSensorConfig `yaml:"load_sensor"`
 	Warden     WardenConfig     `yaml:"warden"`
+	QRMI       QRMIConfig       `yaml:"qrmi"`
 	Static     StaticConfig     `yaml:"static"`
+}
+
+type QRMIConfig struct {
+	ConfigPath string `yaml:"config_path"`
+	Resource   string `yaml:"resource"`
 }
 
 type LoadSensorConfig struct {
@@ -24,9 +30,10 @@ type LoadSensorConfig struct {
 }
 
 type WardenConfig struct {
-	BaseURL   string `yaml:"base_url"`
-	Endpoint  string `yaml:"endpoint"`
-	TLSVerify bool   `yaml:"tls_verify"`
+	BaseURL       string `yaml:"base_url"`
+	Endpoint      string `yaml:"endpoint"`
+	SlotsEndpoint string `yaml:"slots_endpoint"`
+	TLSVerify     bool   `yaml:"tls_verify"`
 }
 
 type StaticConfig struct {
@@ -72,6 +79,12 @@ func (c *Config) ApplyDefaults() {
 	if c.Warden.Endpoint == "" {
 		c.Warden.Endpoint = "/accessible"
 	}
+	if c.Warden.SlotsEndpoint == "" {
+		c.Warden.SlotsEndpoint = "/qpu-slots"
+	}
+	if c.QRMI.ConfigPath == "" {
+		c.QRMI.ConfigPath = "/etc/qrmi/qrmi_config.json"
+	}
 }
 
 func (c Config) Provider() (AvailabilityProvider, time.Duration, error) {
@@ -81,11 +94,22 @@ func (c Config) Provider() (AvailabilityProvider, time.Duration, error) {
 		return StaticProvider{Ready: c.Static.Ready, StateFile: c.Static.StateFile}, timeout, nil
 	case "warden":
 		provider := WardenProvider{
-			BaseURL:   c.Warden.BaseURL,
-			Endpoint:  c.Warden.Endpoint,
-			TLSVerify: c.Warden.TLSVerify,
+			BaseURL:       c.Warden.BaseURL,
+			Endpoint:      c.Warden.Endpoint,
+			SlotsEndpoint: c.Warden.SlotsEndpoint,
+			ReadSlots:     c.LoadSensor.SlotsResourceName != "",
+			TLSVerify:     c.Warden.TLSVerify,
 		}
 		return provider.WithTimeout(timeout), timeout, nil
+	case "qrmi":
+		if c.QRMI.Resource == "" {
+			return nil, timeout, fmt.Errorf("qrmi provider needs qrmi.resource")
+		}
+		return &QRMIProvider{
+			ConfigPath: c.QRMI.ConfigPath,
+			Resource:   c.QRMI.Resource,
+			ReadSlots:  c.LoadSensor.SlotsResourceName != "",
+		}, timeout, nil
 	default:
 		return nil, timeout, fmt.Errorf("unknown availability provider %q", c.LoadSensor.Provider)
 	}
