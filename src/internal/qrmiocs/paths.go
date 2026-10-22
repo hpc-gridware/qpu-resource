@@ -5,6 +5,7 @@ package qrmiocs
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 )
@@ -41,4 +42,26 @@ func ResolveMetadataPath() (string, error) {
 		return "", errors.New("SGE_JOB_SPOOL_DIR is unset")
 	}
 	return filepath.Join(spool, MetadataFilename), nil
+}
+
+// FailedReleaseDir is the directory in the execd's host spool directory
+// where the epilog keeps the metadata of a failed release. OCS removes the
+// job's spool directory after the job; the host spool directory stays.
+const FailedReleaseDir = "qrmi_failed_releases"
+
+// PreserveFailedRelease moves the metadata file at path from
+// <host spool>/active_jobs/<job>.<task> to
+// <host spool>/qrmi_failed_releases/<job>.<task>.tsv and returns the new
+// path. An existing record of the same name is not replaced.
+func PreserveFailedRelease(path string) (string, error) {
+	jobDir := filepath.Dir(path)
+	dir := filepath.Join(filepath.Dir(filepath.Dir(jobDir)), FailedReleaseDir)
+	if err := os.Mkdir(dir, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
+		return "", err
+	}
+	kept := filepath.Join(dir, filepath.Base(jobDir)+".tsv")
+	if err := os.Link(path, kept); err != nil {
+		return "", err
+	}
+	return kept, os.Remove(path)
 }

@@ -42,11 +42,11 @@ var (
 // job cannot set them: values of the same names in the hook environment
 // are ignored.
 type LaunchSettings struct {
-	SGERoot     string // $SGE_ROOT
-	SGECell     string // $SGE_CELL
-	SpoolRoot   string // execd spool directory; SGERoot when empty
-	QmasterPort string // optional, when /etc/services has no sge_qmaster entry
-	ExecdPort   string // optional, when /etc/services has no sge_execd entry
+	SGERoot     string   // $SGE_ROOT
+	SGECell     string   // $SGE_CELL
+	SpoolRoots  []string // global and host-local execd_spool_dir values; SGERoot when empty
+	QmasterPort string   // optional, when /etc/services has no sge_qmaster entry
+	ExecdPort   string   // optional, when /etc/services has no sge_execd entry
 }
 
 // LaunchEnv builds the hook environment for qrmi-ocs-launch. It fails the
@@ -79,11 +79,17 @@ func LaunchEnv(environ []string, s LaunchSettings) ([]string, error) {
 		return nil, JobError(errors.New("invalid SGE_TASK_ID"))
 	}
 	spool := values["SGE_JOB_SPOOL_DIR"]
-	spoolRoot := s.SpoolRoot
-	if spoolRoot == "" {
-		spoolRoot = s.SGERoot
+	roots := s.SpoolRoots
+	if len(roots) == 0 {
+		roots = []string{s.SGERoot}
 	}
-	if err := CheckSpoolDir(spool, spoolRoot, jobID, taskID); err != nil {
+	var err error
+	for _, root := range roots {
+		if err = CheckSpoolDir(spool, root, jobID, taskID); err == nil {
+			break
+		}
+	}
+	if err != nil {
 		return nil, JobError(err)
 	}
 	out := []string{"JOB_ID=" + jobID, "SGE_JOB_SPOOL_DIR=" + spool, "SGE_ROOT=" + s.SGERoot, "SGE_CELL=" + s.SGECell}
@@ -103,13 +109,13 @@ func LaunchEnv(environ []string, s LaunchSettings) ([]string, error) {
 }
 
 func (s LaunchSettings) validate() error {
-	for _, dir := range []string{s.SGERoot, s.SpoolRoot} {
-		if dir != "" && (!filepath.IsAbs(dir) || filepath.Clean(dir) != dir) {
-			return fmt.Errorf("invalid directory %q", dir)
-		}
-	}
 	if s.SGERoot == "" || !cellPattern.MatchString(s.SGECell) {
 		return errors.New("--sge-root and --sge-cell are required")
+	}
+	for _, dir := range append([]string{s.SGERoot}, s.SpoolRoots...) {
+		if !filepath.IsAbs(dir) || filepath.Clean(dir) != dir {
+			return fmt.Errorf("invalid directory %q", dir)
+		}
 	}
 	for _, port := range []string{s.QmasterPort, s.ExecdPort} {
 		if port != "" && !digits.MatchString(port) {

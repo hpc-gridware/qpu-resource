@@ -4,6 +4,7 @@
 package qrmiocs_test
 
 import (
+	"os"
 	"path/filepath"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -63,5 +64,26 @@ var _ = Describe("ResolveUsagePath", func() {
 	It("errors when SGE_JOB_SPOOL_DIR is unset", func() {
 		_, err := qrmiocs.ResolveUsagePath()
 		Expect(err).To(HaveOccurred())
+	})
+})
+
+var _ = Describe("PreserveFailedRelease", func() {
+	It("moves the metadata to the host spool directory without replacing a record", func() {
+		host := GinkgoT().TempDir()
+		spool := filepath.Join(host, "active_jobs", "42.1")
+		Expect(os.MkdirAll(spool, 0o755)).To(Succeed())
+		meta := filepath.Join(spool, qrmiocs.MetadataFilename)
+		Expect(os.WriteFile(meta, []byte("first\n"), 0o600)).To(Succeed())
+
+		kept, err := qrmiocs.PreserveFailedRelease(meta)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(kept).To(Equal(filepath.Join(host, qrmiocs.FailedReleaseDir, "42.1.tsv")))
+		Expect(meta).ToNot(BeAnExistingFile())
+
+		Expect(os.WriteFile(meta, []byte("second\n"), 0o600)).To(Succeed())
+		_, err = qrmiocs.PreserveFailedRelease(meta)
+		Expect(err).To(HaveOccurred())
+		Expect(os.ReadFile(kept)).To(Equal([]byte("first\n")))
+		Expect(meta).To(BeAnExistingFile())
 	})
 })

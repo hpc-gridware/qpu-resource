@@ -126,6 +126,32 @@ static int resolve_usage_path(char *path, size_t size) {
     return 0;
 }
 
+/* preserve_failed_release moves the metadata of a failed release from
+ * <host spool>/active_jobs/<job>.<task> to
+ * <host spool>/qrmi_failed_releases/<job>.<task>.tsv. OCS removes the job's
+ * spool directory after the job; the host spool directory stays. An existing
+ * record of the same name is not replaced.
+ */
+static int preserve_failed_release(const char *metadata_path, char *kept, size_t size) {
+    const char *spool = getenv("SGE_JOB_SPOOL_DIR");
+    const char *job = spool == NULL ? NULL : strrchr(spool, '/');
+    const char *active = job == NULL ? NULL : memrchr(spool, '/', (size_t)(job - spool));
+    int host_len;
+
+    if (active == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    host_len = (int)(active - spool);
+    if (snprintf(kept, size, "%.*s/qrmi_failed_releases", host_len, spool) >= (int)size ||
+        (mkdir(kept, 0700) != 0 && errno != EEXIST) ||
+        snprintf(kept, size, "%.*s/qrmi_failed_releases%s.tsv", host_len, spool, job) >= (int)size ||
+        link(metadata_path, kept) != 0) {
+        return -1;
+    }
+    return unlink(metadata_path);
+}
+
 // prepares runtime env for the epilog.
 static int set_runtime_env(FILE *job_env, const char *key, const char *value, bool export_to_job) {
     if (setenv(key, value, 1) != 0) {
@@ -398,10 +424,11 @@ static int release_record(const char *config_path, const char *job_owner, const 
 }
 
 /* main exits 0 when there is nothing to release or the release was
- * attempted. A failed release is logged, recorded in accounting and leaves
- * the metadata file for administrator recovery: the job has finished, and a
- * non-zero code would put the queue instance into error state. Only a
- * missing spool directory or unreadable metadata exit 1.
+ * attempted. A failed release is logged, recorded in accounting and moves
+ * the metadata file out of the job spool for administrator recovery (see
+ * preserve_failed_release): the job has finished, and a non-zero code would
+ * put the queue instance into error state. Only a missing spool directory or
+ * unreadable metadata exit 1.
  */
 int main(int argc, char **argv) {
     const char *config_path = DEFAULT_QRMI_CONFIG_PATH;
@@ -410,6 +437,7 @@ int main(int argc, char **argv) {
     bool metadata_error = false;
     int arg;
     char metadata_path[PATH_MAX];
+    char kept_path[PATH_MAX];
     char job_env_path[PATH_MAX];
     char usage_path[PATH_MAX];
     FILE *metadata = NULL;
@@ -537,8 +565,11 @@ int main(int argc, char **argv) {
         if (unlink(metadata_path) != 0 && errno != ENOENT) {
             log_line(stderr, "WARN", "failed to remove metadata file %s: %s", metadata_path, strerror(errno));
         }
+    } else if (preserve_failed_release(metadata_path, kept_path, sizeof(kept_path)) != 0) {
+        log_line(stderr, "WARN", "failed to move metadata file %s out of the job spool for administrator recovery: %s",
+                 metadata_path, strerror(errno));
     } else {
-        log_line(stderr, "WARN", "retaining metadata file %s for administrator recovery", metadata_path);
+        log_line(stderr, "WARN", "moved metadata for administrator recovery to %s", kept_path);
     }
 
     elapsed = (long)(time(NULL) - start_ts);

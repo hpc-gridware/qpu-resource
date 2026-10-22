@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -360,7 +361,9 @@ int main(void) {
   char bad_type_line[] = "res\t1x\ttok\t123\n";
   char bad_epoch_line[] = "res\t1\ttok\t123x\n";
   char good_line[] = "res\t1\ttok\t123\n";
-  char spool_template[] = "/tmp/qrmi_epilog_XXXXXX";
+  char host_template[] = "/tmp/qrmi_epilog_XXXXXX";
+  char spool_template[PATH_MAX];
+  char kept_path[PATH_MAX];
   char metadata_path[PATH_MAX];
   char env_path[PATH_MAX];
   int metadata_fd;
@@ -377,7 +380,12 @@ int main(void) {
   if (parse_record_line(good_line, &rec) != 0) { return 12; }
   free_record(&rec);
 
-  if (mkdtemp(spool_template) == NULL) { return 19; }
+  if (mkdtemp(host_template) == NULL) { return 19; }
+  snprintf(spool_template, sizeof(spool_template), "%%s/active_jobs", host_template);
+  if (mkdir(spool_template, 0755) != 0) { return 19; }
+  snprintf(spool_template, sizeof(spool_template), "%%s/active_jobs/42.1", host_template);
+  if (mkdir(spool_template, 0755) != 0) { return 19; }
+  snprintf(kept_path, sizeof(kept_path), "%%s/qrmi_failed_releases/42.1.tsv", host_template);
   if (snprintf(metadata_path, sizeof(metadata_path), "%%s/%%s", spool_template, METADATA_FILENAME) >= (int)sizeof(metadata_path)) { return 20; }
   if (snprintf(env_path, sizeof(env_path), "%%s/environment", spool_template) >= (int)sizeof(env_path)) { return 20; }
   metadata_fd = open(metadata_path, O_WRONLY | O_CREAT | O_EXCL, 0600);
@@ -407,10 +415,17 @@ int main(void) {
   env_buf[env_len] = '\0';
   if (strstr(env_buf, "qrmi_release_failed=1") == NULL) { return 33; }
   if (strstr(env_buf, "qrmi_epilog_status=error") == NULL) { return 34; }
+  if (access(metadata_path, F_OK) == 0) { return 35; }
+  if (access(kept_path, F_OK) != 0) { return 36; }
 
-  unlink(metadata_path);
+  unlink(kept_path);
   unlink(env_path);
   rmdir(spool_template);
+  *strrchr(spool_template, '/') = '\0';
+  rmdir(spool_template);
+  *strrchr(kept_path, '/') = '\0';
+  rmdir(kept_path);
+  rmdir(host_template);
   return 0;
 }
 `, cIncludePath(epilogMain)),
@@ -471,13 +486,23 @@ func runCHarness(t *testing.T, qrmiInclude, source string) {
 	}
 }
 
-// globalConfigQConf answers ShowGlobalConfiguration; other calls panic.
-type globalConfigQConf struct {
+// spoolConfigQConf answers the global and host configuration queries;
+// other calls panic.
+type spoolConfigQConf struct {
 	qconf.QConf
-	cfg *qconf.GlobalConfig
+	cfg   *qconf.GlobalConfig
+	hosts map[string]qconf.HostConfiguration
 }
 
-func (q globalConfigQConf) ShowGlobalConfiguration() (*qconf.GlobalConfig, error) { return q.cfg, nil }
+func (q spoolConfigQConf) ShowGlobalConfiguration() (*qconf.GlobalConfig, error) { return q.cfg, nil }
+
+func (q spoolConfigQConf) ShowHostConfigurations() ([]string, error) {
+	return slices.Sorted(maps.Keys(q.hosts)), nil
+}
+
+func (q spoolConfigQConf) ShowHostConfiguration(host string) (qconf.HostConfiguration, error) {
+	return q.hosts[host], nil
+}
 
 func TestLauncherSettingsComeFromTheCluster(t *testing.T) {
 	t.Setenv("SGE_ROOT", "/opt/ocs/")
@@ -486,16 +511,21 @@ func TestLauncherSettingsComeFromTheCluster(t *testing.T) {
 	t.Setenv("SGE_EXECD_PORT", "")
 	cfg := &qconf.GlobalConfig{}
 	cfg.ExecdSpoolDir = "/var/spool/ocs/execd"
-	got, err := launcherSettings(globalConfigQConf{cfg: cfg})
+	local, same := "/local/spool/", "/var/spool/ocs/execd"
+	qc := spoolConfigQConf{cfg: cfg, hosts: map[string]qconf.HostConfiguration{
+		"node1": {ExecdSpoolDir: &local}, "node2": {ExecdSpoolDir: &same}, "node3": {},
+	}}
+	got, err := launcherSettings(qc)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"--sge-root=/opt/ocs", "--sge-cell=default", "--spool-root=/var/spool/ocs/execd", "--qmaster-port=6444"}
+	want := []string{"--sge-root=/opt/ocs", "--sge-cell=default", "--spool-root=/var/spool/ocs/execd",
+		"--spool-root=/local/spool", "--qmaster-port=6444"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
 	t.Setenv("SGE_ROOT", "")
-	if _, err := launcherSettings(globalConfigQConf{cfg: cfg}); err == nil {
+	if _, err := launcherSettings(qc); err == nil {
 		t.Fatal("expected an unset SGE_ROOT to be rejected")
 	}
 }

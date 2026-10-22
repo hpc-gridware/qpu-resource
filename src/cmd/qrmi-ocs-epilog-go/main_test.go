@@ -22,12 +22,16 @@ var _ = Describe("epilog run()", func() {
 		spool string
 		meta  string
 		usage string
+		kept  string
 	)
 
 	BeforeEach(func() {
-		spool = GinkgoT().TempDir()
+		host := GinkgoT().TempDir()
+		spool = filepath.Join(host, "active_jobs", "42.1")
+		Expect(os.MkdirAll(spool, 0o755)).To(Succeed())
 		meta = filepath.Join(spool, "qrmi_ocs_acquired.tsv")
 		usage = filepath.Join(spool, "usage")
+		kept = filepath.Join(host, "qrmi_failed_releases", "42.1.tsv")
 
 		GinkgoT().Setenv("SGE_JOB_SPOOL_DIR", spool)
 	})
@@ -58,20 +62,23 @@ var _ = Describe("epilog run()", func() {
 		Expect(string(data)).To(ContainSubstring("qrmi_epilog_status_code=0\n"))
 	})
 
-	It("retains the metadata file after a parse failure", func() {
+	It("moves the metadata file out of the job spool after a parse failure", func() {
 		Expect(os.WriteFile(meta, []byte("badline\n"), 0o644)).To(Succeed())
 		Expect(run(cfg)).To(Equal(1))
 
-		_, err := os.Stat(meta)
-		Expect(err).ToNot(HaveOccurred())
+		Expect(meta).ToNot(BeAnExistingFile())
+		Expect(os.ReadFile(kept)).To(Equal([]byte("badline\n")))
 	})
 
-	It("exits 0 but retains the metadata file after a release failure", func() {
+	It("exits 0 and moves the metadata file out of the job spool after a release failure", func() {
 		Expect(os.WriteFile(meta, []byte("PASQAL_LOCAL\t4\tsession-id\t1\n"), 0o600)).To(Succeed())
 		Expect(run(cfg)).To(Equal(0))
 
-		_, err := os.Stat(meta)
+		Expect(meta).ToNot(BeAnExistingFile())
+		Expect(os.ReadFile(kept)).To(Equal([]byte("PASQAL_LOCAL\t4\tsession-id\t1\n")))
+		info, err := os.Stat(filepath.Dir(kept))
 		Expect(err).ToNot(HaveOccurred())
+		Expect(info.Mode().Perm()).To(Equal(os.FileMode(0o700)))
 		data, err := os.ReadFile(usage)
 		Expect(err).ToNot(HaveOccurred())
 		Expect(string(data)).To(ContainSubstring("qrmi_release_failed=1\n"))

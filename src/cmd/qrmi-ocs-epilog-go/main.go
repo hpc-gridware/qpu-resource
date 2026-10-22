@@ -77,9 +77,10 @@ func parseHookArgs(args []string) (hookConfig, error) {
 //
 // A missing metadata file is success: the prolog recorded no acquisition
 // for this job (for example because it requested no QPU). A failed release
-// is logged, recorded in accounting and leaves the metadata file for
-// administrator recovery, but still exits 0: the job has finished, and
-// a non-zero code would put the queue instance into error state. Only
+// is logged, recorded in accounting and moves the metadata file out of the
+// job spool, which OCS removes, for administrator recovery (see
+// qrmiocs.PreserveFailedRelease), but still exits 0: the job has finished,
+// and a non-zero code would put the queue instance into error state. Only
 // unreadable metadata or a missing spool directory exit 1.
 //
 // Exit semantics match the C version.
@@ -115,8 +116,10 @@ func run(cfg hookConfig) int {
 		if err := os.Remove(metaPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			log.Warn("failed to remove metadata file %s: %v", metaPath, err)
 		}
+	} else if kept, err := qrmiocs.PreserveFailedRelease(metaPath); err != nil {
+		log.Warn("failed to move metadata file %s out of the job spool for administrator recovery: %v", metaPath, err)
 	} else {
-		log.Warn("retaining metadata file %s for administrator recovery", metaPath)
+		log.Warn("moved metadata for administrator recovery to %s", kept)
 	}
 
 	elapsed := int64(time.Since(start).Seconds())

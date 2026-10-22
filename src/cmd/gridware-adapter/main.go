@@ -682,8 +682,9 @@ const launcherName = "qrmi-ocs-launch"
 
 // launcherSettings returns the qrmi-ocs-launch options for this cluster:
 // SGE_ROOT, SGE_CELL and the ports from the environment setup-qrmi-support
-// runs in (the OCS settings file), and the global execd_spool_dir. The
-// launcher uses these instead of the values in the job's environment.
+// runs in (the OCS settings file), and one --spool-root for the global
+// execd_spool_dir and each distinct host-local override. The launcher uses
+// these instead of the values in the job's environment.
 func launcherSettings(qc qconf.QConf) ([]string, error) {
 	root, cell := os.Getenv("SGE_ROOT"), os.Getenv("SGE_CELL")
 	if cell == "" {
@@ -693,8 +694,12 @@ func launcherSettings(qc qconf.QConf) ([]string, error) {
 		return nil, errors.New("SGE_ROOT must be set to an absolute path; source the OCS settings file first")
 	}
 	args := []string{"--sge-root=" + filepath.Clean(root), "--sge-cell=" + cell}
-	if global, err := qc.ShowGlobalConfiguration(); err == nil && global != nil && filepath.IsAbs(global.ExecdSpoolDir) {
-		args = append(args, "--spool-root="+filepath.Clean(global.ExecdSpoolDir))
+	roots, err := spoolRoots(qc)
+	if err != nil {
+		return nil, err
+	}
+	for _, root := range roots {
+		args = append(args, "--spool-root="+root)
 	}
 	for _, port := range []struct{ env, option string }{
 		{"SGE_QMASTER_PORT", "--qmaster-port="},
@@ -705,6 +710,35 @@ func launcherSettings(qc qconf.QConf) ([]string, error) {
 		}
 	}
 	return args, nil
+}
+
+// spoolRoots returns the global execd_spool_dir and the distinct host-local
+// overrides from qconf -sconf <host>. A host whose override is added later
+// needs setup-qrmi-support or configure-queue-hooks to be run again.
+func spoolRoots(qc qconf.QConf) ([]string, error) {
+	var roots []string
+	add := func(dir string) {
+		if dir = strings.TrimSpace(dir); filepath.IsAbs(dir) && !slices.Contains(roots, filepath.Clean(dir)) {
+			roots = append(roots, filepath.Clean(dir))
+		}
+	}
+	if global, err := qc.ShowGlobalConfiguration(); err == nil && global != nil {
+		add(global.ExecdSpoolDir)
+	}
+	hosts, err := qc.ShowHostConfigurations()
+	if err != nil {
+		return nil, fmt.Errorf("list host configurations: %w", err)
+	}
+	for _, host := range hosts {
+		cfg, err := qc.ShowHostConfiguration(host)
+		if err != nil {
+			return nil, fmt.Errorf("show host configuration %q: %w", host, err)
+		}
+		if cfg.ExecdSpoolDir != nil {
+			add(*cfg.ExecdSpoolDir)
+		}
+	}
+	return roots, nil
 }
 
 // qrmiQueueHookCommand builds

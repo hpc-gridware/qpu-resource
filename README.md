@@ -219,16 +219,18 @@ Because the hooks run privileged with the job's environment, they trust only
 the scheduler:
 
 - The queue command starts them through `qrmi-ocs-launch`
-  (`<hook-user>@<dir>/qrmi-ocs-launch --sge-root=… --sge-cell=… [--spool-root=…]
+  (`<hook-user>@<dir>/qrmi-ocs-launch --sge-root=… --sge-cell=… [--spool-root=…]…
   [--qmaster-port=…] [--execd-port=…] <hook> … $job_owner`; `--launcher` sets
   another path). `setup-qrmi-support` writes the launcher options from its own
-  `SGE_ROOT`, `SGE_CELL` and ports and the global `execd_spool_dir`. The
+  `SGE_ROOT`, `SGE_CELL` and ports, and one `--spool-root` for the global
+  `execd_spool_dir` and for each host-local override (`qconf -sconf <host>`).
+  Run it again after setting a host-local `execd_spool_dir`. The
   launcher is statically linked, so no dynamic loader reads the job's
   environment. It refuses to run, failing the job, when `LD_*` or
   `GLIBC_TUNABLES` is set. Otherwise it changes to `/` and starts the hook with:
   `JOB_ID`, `SGE_TASK_ID` and `SGE_JOB_SPOOL_DIR` from OCS, validated (the
-  spool directory must be the job's own `…/active_jobs/<job>.<task>` below the
-  spool root, without symbolic links); `SGE_ROOT`, `SGE_CELL` and the ports from
+  spool directory must be the job's own `…/active_jobs/<job>.<task>` below one
+  of the spool roots, without symbolic links); `SGE_ROOT`, `SGE_CELL` and the ports from
   its options; `TZ` if it is a plain time zone name; a fixed `PATH`, the hook
   user's `HOME` and the `C` locale. Everything else is dropped: `QRMI_*` and
   `<BACKEND>_QRMI_*` settings, proxy and TLS trust variables, `RUST_LOG` (the
@@ -251,8 +253,11 @@ requests no QPU, `100` (job error) when the request cannot be served, for
 example a backend missing from `qrmi_config.json`, `99` (reschedule) when the
 backend is temporarily unavailable, and `1` (queue error) only for host or
 configuration problems. A failed release in the epilog is logged and recorded
-in accounting (`qrmi_release_failed`), and the metadata file is kept for
-recovery, but the epilog still exits `0`.
+in accounting (`qrmi_release_failed`), but the epilog still exits `0`. OCS
+deletes the job's spool directory after the job, so the epilog moves the
+metadata file, which holds the acquisition token, to
+`<execd spool>/<host>/qrmi_failed_releases/<job>.<task>.tsv` (directory mode
+`0700`, owned by the hook user) for the administrator to release by hand.
 
 ```bash
 ./adapter setup-qrmi-support \

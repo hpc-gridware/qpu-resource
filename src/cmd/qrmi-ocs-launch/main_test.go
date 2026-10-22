@@ -121,6 +121,22 @@ func TestPrepareRejectsTamperedSpoolDirectory(t *testing.T) {
 	}
 }
 
+func TestPrepareAcceptsHostLocalSpoolRoot(t *testing.T) {
+	_, args, _ := testCluster(t)
+	local := t.TempDir()
+	spool := filepath.Join(local, "node", "active_jobs", "42.1")
+	if err := os.MkdirAll(spool, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	env := []string{"JOB_ID=42", "SGE_JOB_SPOOL_DIR=" + spool}
+	if _, _, _, err := prepare(run(args), env); qrmiocs.ExitCode(err) != qrmiocs.ExitJobError {
+		t.Fatalf("expected a job error without the host-local root, got %v", err)
+	}
+	if _, _, _, err := prepare(run(append(slices.Clone(args), "--spool-root="+local)), env); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestPrepareRequiresClusterOptions(t *testing.T) {
 	_, args, spool := testCluster(t)
 	env := []string{"JOB_ID=42", "SGE_JOB_SPOOL_DIR=" + spool}
@@ -129,6 +145,7 @@ func TestPrepareRequiresClusterOptions(t *testing.T) {
 		"relative root":  {"qrmi-ocs-launch", "--sge-root=opt/ocs", "--sge-cell=default"},
 		"bad cell":       {"qrmi-ocs-launch", "--sge-root=/opt/ocs", "--sge-cell=../x"},
 		"bad port":       append(slices.Clone(args), "--execd-port=x"),
+		"empty spool":    append(slices.Clone(args), "--spool-root="),
 		"unknown option": append(slices.Clone(args), "--sge-rot=/x"),
 	} {
 		_, _, _, err := prepare(run(bad), env)

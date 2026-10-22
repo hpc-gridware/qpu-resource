@@ -12,7 +12,8 @@
 // environment. It refuses to run if loader variables are set, keeps only
 // the variables OCS sets for the hook (validated, see qrmiocs.LaunchEnv),
 // takes SGE_ROOT, SGE_CELL and the ports from its own options, changes to /
-// and replaces itself with the hook via execve:
+// and replaces itself with the hook via execve. --spool-root may be given
+// once per execd spool directory (the global one and host-local overrides):
 //
 //	root@/opt/ocs/qrmi/hooks/qrmi-ocs-launch --sge-root=/opt/ocs --sge-cell=default \
 //	    /opt/ocs/qrmi/hooks/qrmi-ocs-prolog --config=... $job_owner
@@ -53,7 +54,6 @@ func prepare(args, environ []string) (string, []string, []string, error) {
 	options := map[string]*string{
 		"--sge-root=":     &settings.SGERoot,
 		"--sge-cell=":     &settings.SGECell,
-		"--spool-root=":   &settings.SpoolRoot,
 		"--qmaster-port=": &settings.QmasterPort,
 		"--execd-port=":   &settings.ExecdPort,
 	}
@@ -61,13 +61,17 @@ func prepare(args, environ []string) (string, []string, []string, error) {
 	for ; i < len(args) && strings.HasPrefix(args[i], "--"); i++ {
 		name, value, _ := strings.Cut(args[i], "=")
 		target, ok := options[name+"="]
-		if !ok {
+		switch {
+		case name == "--spool-root":
+			settings.SpoolRoots = append(settings.SpoolRoots, value)
+		case !ok:
 			return "", nil, nil, fmt.Errorf("unknown option %s", name)
+		default:
+			*target = value
 		}
-		*target = value
 	}
 	if i >= len(args) {
-		return "", nil, nil, fmt.Errorf("usage: %s --sge-root=DIR --sge-cell=CELL [--spool-root=DIR] "+
+		return "", nil, nil, fmt.Errorf("usage: %s --sge-root=DIR --sge-cell=CELL [--spool-root=DIR]... "+
 			"[--qmaster-port=N] [--execd-port=N] <hook> [hook arguments]", filepath.Base(args[0]))
 	}
 	env, err := qrmiocs.LaunchEnv(environ, settings)
