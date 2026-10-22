@@ -4,6 +4,8 @@
 package qrmiocs_test
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 
@@ -22,8 +24,8 @@ var _ = Describe("JobEnv", func() {
 	BeforeEach(func() {
 		dir := GinkgoT().TempDir()
 		path = filepath.Join(dir, "environment")
-		GinkgoT().Setenv("SGE_JOB_ENV", path)
-		GinkgoT().Setenv("SGE_JOB_SPOOL_DIR", "")
+		GinkgoT().Setenv("SGE_JOB_SPOOL_DIR", dir)
+		Expect(os.WriteFile(path, nil, 0o644)).To(Succeed())
 
 		var err error
 		je, err = qrmiocs.OpenJobEnv()
@@ -41,6 +43,9 @@ var _ = Describe("JobEnv", func() {
 		data, err := os.ReadFile(path)
 		Expect(err).ToNot(HaveOccurred())
 		Expect(string(data)).To(ContainSubstring("FOO=bar\n"))
+		info, err := os.Stat(path)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(info.Mode().Perm()).To(Equal(os.FileMode(0o600)))
 	})
 
 	It("appends multiple lines in order", func() {
@@ -62,7 +67,7 @@ var _ = Describe("JobEnv", func() {
 	})
 })
 
-var _ = Describe("JobEnv.ApplyDefaultRustLog", func() {
+var _ = Describe("JobEnv.ApplyRustLog", func() {
 	var (
 		path string
 		je   *qrmiocs.JobEnv
@@ -71,11 +76,8 @@ var _ = Describe("JobEnv.ApplyDefaultRustLog", func() {
 	BeforeEach(func() {
 		dir := GinkgoT().TempDir()
 		path = filepath.Join(dir, "environment")
-		GinkgoT().Setenv("SGE_JOB_ENV", path)
-		GinkgoT().Setenv("SGE_JOB_SPOOL_DIR", "")
+		GinkgoT().Setenv("SGE_JOB_SPOOL_DIR", dir)
 		GinkgoT().Setenv("RUST_LOG", "")
-		GinkgoT().Setenv("QRMI_OCS_LOG_LEVEL", "")
-		GinkgoT().Setenv("SGE_DEBUG_LEVEL", "")
 
 		var err error
 		je, err = qrmiocs.OpenJobEnv()
@@ -86,31 +88,61 @@ var _ = Describe("JobEnv.ApplyDefaultRustLog", func() {
 		Expect(je.Close()).To(Succeed())
 	})
 
-	It("does not overwrite RUST_LOG when already set", func() {
-		GinkgoT().Setenv("RUST_LOG", "warn")
-		GinkgoT().Setenv("SGE_DEBUG_LEVEL", "5")
-		Expect(je.ApplyDefaultRustLog()).To(Succeed())
-		Expect(os.Getenv("RUST_LOG")).To(Equal("warn"))
-
-		data, _ := os.ReadFile(path)
-		Expect(string(data)).ToNot(ContainSubstring("RUST_LOG="))
-	})
-
-	It("derives from QRMI_OCS_LOG_LEVEL first", func() {
-		GinkgoT().Setenv("QRMI_OCS_LOG_LEVEL", "4")
-		GinkgoT().Setenv("SGE_DEBUG_LEVEL", "2")
-		Expect(je.ApplyDefaultRustLog()).To(Succeed())
+	It("maps the hook's log level to RUST_LOG", func() {
+		Expect(je.ApplyRustLog("4")).To(Succeed())
 		Expect(os.Getenv("RUST_LOG")).To(Equal("debug"))
+		data, _ := os.ReadFile(path)
+		Expect(string(data)).To(ContainSubstring("RUST_LOG=debug\n"))
 	})
 
-	It("falls back to SGE_DEBUG_LEVEL", func() {
-		GinkgoT().Setenv("SGE_DEBUG_LEVEL", "3")
-		Expect(je.ApplyDefaultRustLog()).To(Succeed())
-		Expect(os.Getenv("RUST_LOG")).To(Equal("info"))
-	})
-
-	It("is a no-op when neither maps to a known level", func() {
-		Expect(je.ApplyDefaultRustLog()).To(Succeed())
+	It("is a no-op for an empty or unknown level", func() {
+		Expect(je.ApplyRustLog("")).To(Succeed())
+		Expect(je.ApplyRustLog("verbose")).To(Succeed())
 		Expect(os.Getenv("RUST_LOG")).To(Equal(""))
+	})
+})
+
+var _ = Describe("ResetProcessEnv", func() {
+	It("keeps only the variables OCS sets for the hooks", func() {
+		GinkgoT().Setenv("JOB_ID", "42")
+		GinkgoT().Setenv("SGE_JOB_SPOOL_DIR", "/spool/42.1")
+		GinkgoT().Setenv("PASQAL_CONFIG_ROOT", "/root")
+		GinkgoT().Setenv("EMU_FREE_QRMI_PASQAL_CLOUD_AUTH_ENDPOINT", "https://example.invalid")
+		GinkgoT().Setenv("PATH", "/tmp/evil")
+		GinkgoT().Setenv("HOME", "/home/alice")
+		Expect(qrmiocs.ResetProcessEnv()).To(Succeed())
+		Expect(os.Getenv("JOB_ID")).To(Equal("42"))
+		Expect(os.Getenv("SGE_JOB_SPOOL_DIR")).To(Equal("/spool/42.1"))
+		Expect(os.Getenv("PATH")).To(Equal(qrmiocs.TrustedPath))
+		Expect(os.Getenv("HOME")).NotTo(Equal("/home/alice"))
+		Expect(os.Getenv("LC_ALL")).To(Equal("C"))
+		_, ok := os.LookupEnv("PASQAL_CONFIG_ROOT")
+		Expect(ok).To(BeFalse())
+		_, ok = os.LookupEnv("EMU_FREE_QRMI_PASQAL_CLOUD_AUTH_ENDPOINT")
+		Expect(ok).To(BeFalse())
+	})
+})
+
+var _ = Describe("CheckLoaderEnv", func() {
+	It("fails the job when loader variables are still set", func() {
+		for _, kv := range []string{"LD_AUDIT=/tmp/x.so", "LD_PRELOAD=/tmp/x.so", "GLIBC_TUNABLES=glibc.x=1"} {
+			err := qrmiocs.CheckLoaderEnv([]string{"JOB_ID=1", kv})
+			Expect(qrmiocs.ExitCode(err)).To(Equal(qrmiocs.ExitJobError))
+		}
+		Expect(qrmiocs.CheckLoaderEnv([]string{"JOB_ID=1", "OLD_LD=x"})).To(Succeed())
+	})
+
+	It("rejects a tampered trusted value", func() {
+		_, err := qrmiocs.CleanEnv([]string{"JOB_ID=1;rm"})
+		Expect(err).To(HaveOccurred())
+	})
+})
+
+var _ = Describe("ExitCode", func() {
+	It("maps hook errors to OCS exit codes", func() {
+		Expect(qrmiocs.ExitCode(nil)).To(Equal(0))
+		Expect(qrmiocs.ExitCode(errors.New("host"))).To(Equal(1))
+		Expect(qrmiocs.ExitCode(qrmiocs.RetryError(errors.New("busy")))).To(Equal(99))
+		Expect(qrmiocs.ExitCode(fmt.Errorf("wrapped: %w", qrmiocs.JobError(errors.New("bad"))))).To(Equal(100))
 	})
 })

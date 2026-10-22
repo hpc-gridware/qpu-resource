@@ -8,9 +8,12 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"slices"
 	"strings"
 
-	qconf "github.com/hpc-gridware/go-clusterscheduler/pkg/qconf/v9.0"
+	qconf "github.com/hpc-gridware/go-clusterscheduler/pkg/qconf/v9.1"
 )
 
 const defaultReportingPattern = "usage_patterns=qrmi:qrmi_*"
@@ -18,6 +21,7 @@ const defaultResourceName = "qpu"
 const defaultReadyResourceName = "qpu_ready"
 const defaultSlotsResourceName = "qpu_slots"
 const defaultSlotsScope = "host"
+const defaultQRMIConfigPath = "/etc/qrmi/qrmi_config.json"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -124,6 +128,11 @@ func runEnsureResource(args []string) error {
 func runSetupQRMISupport(args []string) error {
 	fs := flag.NewFlagSet("setup-qrmi-support", flag.ContinueOnError)
 	qconfPath := fs.String("qconf", "qconf", "Path to qconf executable")
+	qstatPath := fs.String("qstat", "qstat", "Path to qstat executable used by the prolog")
+	qrmiConfig := fs.String("qrmi-config", defaultQRMIConfigPath, "Administrator-managed QRMI configuration path")
+	hookUser := fs.String("hook-user", "", "User the queue prolog and epilog run as (default: the OCS admin_user, root if none)")
+	launcher := fs.String("launcher", "", "qrmi-ocs-launch path that starts the hooks with a clean environment (default: next to --prolog)")
+	hookLogLevel := fs.String("hook-log-level", "", "QRMI log level for the hooks (error, warn, info, debug, trace or an SGE debug level)")
 	dryRun := fs.Bool("dry-run", false, "Print qconf operations without changing scheduler state")
 
 	hostsCSV := fs.String("hosts", "", "Comma-separated execution hosts to update (required)")
@@ -200,7 +209,19 @@ func runSetupQRMISupport(args []string) error {
 	if err := ensureResourceDefault(qc, hosts, resolvedHostValue, opts); err != nil {
 		return err
 	}
-	return configureQueueHooksDefault(qc, strings.TrimSpace(*queue), strings.TrimSpace(*prolog), strings.TrimSpace(*epilog))
+	hookOpts, err := queueHookOptionsFromFlags(
+		*qrmiConfig,
+		defaultResourceName,
+		opts.slotsName,
+		*qstatPath,
+		*hookUser,
+		*hookLogLevel,
+		*launcher,
+	)
+	if err != nil {
+		return err
+	}
+	return configureQueueHooksDefault(qc, strings.TrimSpace(*queue), strings.TrimSpace(*prolog), strings.TrimSpace(*epilog), hookOpts)
 }
 
 type resourceOptions struct {
@@ -436,21 +457,42 @@ func configureHostLoadSensor(qc qconf.QConf, host, loadSensorPath string) error 
 		return nil
 	}
 	hostCfg.Name = host
-	for _, current := range hostCfg.LoadSensors {
-		if current == loadSensorPath {
-			return nil
-		}
+	sensors := withLoadSensor(hostCfg.LoadSensors, loadSensorPath)
+	if slices.Equal(sensors, hostCfg.LoadSensors) {
+		return nil
 	}
-	hostCfg.LoadSensors = append(hostCfg.LoadSensors, loadSensorPath)
+	hostCfg.LoadSensors = sensors
 	if err := qc.ModifyHostConfiguration(host, hostCfg); err != nil {
 		return fmt.Errorf("modify host configuration %q: %w", host, err)
 	}
 	return nil
 }
 
+// withLoadSensor returns the host's load sensors with loadSensorPath
+// installed once. NONE placeholders and earlier installs of the same sensor
+// binary are replaced; other load sensors are kept.
+func withLoadSensor(current []string, loadSensorPath string) []string {
+	sensors := []string{}
+	for _, sensor := range current {
+		if strings.EqualFold(sensor, "NONE") ||
+			filepath.Base(sensor) == filepath.Base(loadSensorPath) {
+			continue
+		}
+		sensors = append(sensors, sensor)
+	}
+	return append(sensors, loadSensorPath)
+}
+
 func runConfigureQueueHooks(args []string) error {
 	fs := flag.NewFlagSet("configure-queue-hooks", flag.ContinueOnError)
 	qconfPath := fs.String("qconf", "qconf", "Path to qconf executable")
+	qstatPath := fs.String("qstat", "qstat", "Path to qstat executable used by the prolog")
+	qrmiConfig := fs.String("qrmi-config", defaultQRMIConfigPath, "Administrator-managed QRMI configuration path")
+	hookUser := fs.String("hook-user", "", "User the queue prolog and epilog run as (default: the OCS admin_user, root if none)")
+	launcher := fs.String("launcher", "", "qrmi-ocs-launch path that starts the hooks with a clean environment (default: next to --prolog)")
+	hookLogLevel := fs.String("hook-log-level", "", "QRMI log level for the hooks (error, warn, info, debug, trace or an SGE debug level)")
+	resourceName := fs.String("qpu-resource-name", defaultResourceName, "QPU backend complex name")
+	slotsResourceName := fs.String("qpu-slots-name", defaultSlotsResourceName, "QPU slots complex name")
 	dryRun := fs.Bool("dry-run", false, "Print qconf operations without changing scheduler state")
 
 	queue := fs.String("queue", "", "Cluster queue name (required)")
@@ -490,11 +532,96 @@ func runConfigureQueueHooks(args []string) error {
 		return fmt.Errorf("create qconf client: %w", err)
 	}
 
-	return configureQueueHooksDefault(qc, *queue, *prolog, *epilog)
+	hookOpts, err := queueHookOptionsFromFlags(
+		*qrmiConfig,
+		*resourceName,
+		*slotsResourceName,
+		*qstatPath,
+		*hookUser,
+		*hookLogLevel,
+		*launcher,
+	)
+	if err != nil {
+		return err
+	}
+	return configureQueueHooksDefault(qc, *queue, *prolog, *epilog, hookOpts)
 }
 
-func configureQueueHooksDefault(qc qconf.QConf, queue, prolog, epilog string) error {
-	if err := configureQueueHookPaths(qc, queue, prolog, epilog); err != nil {
+type queueHookOptions struct {
+	configPath        string
+	resourceName      string
+	slotsResourceName string
+	qstatPath         string
+	hookUser          string
+	logLevel          string
+	launcher          string
+}
+
+func queueHookOptionsFromFlags(configPath, resourceName, slotsResourceName, qstatPath, hookUser, logLevel, launcher string) (queueHookOptions, error) {
+	resolvedQstat, err := exec.LookPath(strings.TrimSpace(qstatPath))
+	if err != nil {
+		return queueHookOptions{}, fmt.Errorf("resolve qstat executable: %w", err)
+	}
+	resolvedQstat, err = filepath.Abs(resolvedQstat)
+	if err != nil {
+		return queueHookOptions{}, fmt.Errorf("resolve absolute qstat path: %w", err)
+	}
+	opts := queueHookOptions{
+		configPath:        strings.TrimSpace(configPath),
+		resourceName:      strings.TrimSpace(resourceName),
+		slotsResourceName: strings.TrimSpace(slotsResourceName),
+		qstatPath:         resolvedQstat,
+		hookUser:          strings.TrimSpace(hookUser),
+		logLevel:          strings.TrimSpace(logLevel),
+		launcher:          strings.TrimSpace(launcher),
+	}
+	if opts.configPath == "" || opts.resourceName == "" {
+		return queueHookOptions{}, errors.New("QRMI config and QPU resource must not be empty")
+	}
+	if opts.hookUser == "" {
+		user, err := ocsAdminUser(bootstrapPath())
+		if err != nil {
+			return queueHookOptions{}, err
+		}
+		opts.hookUser = user
+	}
+	return opts, nil
+}
+
+// bootstrapPath returns $SGE_ROOT/$SGE_CELL/common/bootstrap.
+func bootstrapPath() string {
+	cell := os.Getenv("SGE_CELL")
+	if cell == "" {
+		cell = "default"
+	}
+	return filepath.Join(os.Getenv("SGE_ROOT"), cell, "common", "bootstrap")
+}
+
+// ocsAdminUser returns the account the queue hooks run as: the cluster's
+// admin_user from the OCS bootstrap file, or root when it is "none". The
+// hooks write QRMI variables into the job's spool environment file, which
+// OCS owns as that account, for every QRMI resource type. Pasqal Local
+// also needs this account to be a Warden administrator, because only
+// administrators may open sessions on behalf of the job owner.
+func ocsAdminUser(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read OCS bootstrap %s (set --hook-user to skip): %w", path, err)
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 2 && fields[0] == "admin_user" {
+			if strings.EqualFold(fields[1], "none") {
+				return "root", nil
+			}
+			return fields[1], nil
+		}
+	}
+	return "root", nil
+}
+
+func configureQueueHooksDefault(qc qconf.QConf, queue, prolog, epilog string, opts queueHookOptions) error {
+	if err := configureQueueHookPaths(qc, queue, prolog, epilog, opts); err != nil {
 		return err
 	}
 	if err := configureGlobalQRMIReporting(qc); err != nil {
@@ -503,20 +630,143 @@ func configureQueueHooksDefault(qc qconf.QConf, queue, prolog, epilog string) er
 	return nil
 }
 
-func configureQueueHookPaths(qc qconf.QConf, queue, prolog, epilog string) error {
+func configureQueueHookPaths(qc qconf.QConf, queue, prolog, epilog string, opts queueHookOptions) error {
+	common := []string{"--config=" + opts.configPath}
+	if opts.logLevel != "" {
+		common = append(common, "--log-level="+opts.logLevel)
+	}
+	launcher := opts.launcher
+	if launcher == "" {
+		launcher = filepath.Join(filepath.Dir(strings.TrimSpace(prolog)), launcherName)
+	}
+	launcherArgs, err := launcherSettings(qc)
+	if err != nil {
+		return err
+	}
+	prologCommand, err := qrmiQueueHookCommand(
+		prolog,
+		launcher,
+		opts.hookUser,
+		launcherArgs,
+		append(common,
+			"--resource="+opts.resourceName,
+			"--slots-resource="+opts.slotsResourceName,
+			"--qstat="+opts.qstatPath,
+		)...,
+	)
+	if err != nil {
+		return fmt.Errorf("invalid prolog: %w", err)
+	}
+	epilogCommand, err := qrmiQueueHookCommand(epilog, launcher, opts.hookUser, launcherArgs, common...)
+	if err != nil {
+		return fmt.Errorf("invalid epilog: %w", err)
+	}
 	queueCfg, err := qc.ShowClusterQueue(queue)
 	if err != nil {
 		return fmt.Errorf("show queue %q: %w", queue, err)
 	}
 	queueCfg.Name = queue
-	queueCfg.Prolog = []string{strings.TrimSpace(prolog)}
-	queueCfg.Epilog = []string{strings.TrimSpace(epilog)}
+	queueCfg.Prolog = []string{prologCommand}
+	queueCfg.Epilog = []string{epilogCommand}
 
 	if err := qc.ModifyClusterQueue(queue, queueCfg); err != nil {
 		return fmt.Errorf("modify queue %q hooks: %w", queue, err)
 	}
-	fmt.Printf("updated queue hooks on %q: prolog=%q epilog=%q\n", queue, prolog, epilog)
+	fmt.Printf("updated queue hooks on %q: prolog=%q epilog=%q\n", queue, prologCommand, epilogCommand)
 	return nil
+}
+
+// launcherName is the statically linked program that starts the hooks with
+// a clean environment.
+const launcherName = "qrmi-ocs-launch"
+
+// launcherSettings returns the qrmi-ocs-launch options for this cluster:
+// SGE_ROOT, SGE_CELL and the ports from the environment setup-qrmi-support
+// runs in (the OCS settings file), and one --spool-root for the global
+// execd_spool_dir and each distinct host-local override. The launcher uses
+// these instead of the values in the job's environment.
+func launcherSettings(qc qconf.QConf) ([]string, error) {
+	root, cell := os.Getenv("SGE_ROOT"), os.Getenv("SGE_CELL")
+	if cell == "" {
+		cell = "default"
+	}
+	if !filepath.IsAbs(root) {
+		return nil, errors.New("SGE_ROOT must be set to an absolute path; source the OCS settings file first")
+	}
+	args := []string{"--sge-root=" + filepath.Clean(root), "--sge-cell=" + cell}
+	roots, err := spoolRoots(qc)
+	if err != nil {
+		return nil, err
+	}
+	for _, root := range roots {
+		args = append(args, "--spool-root="+root)
+	}
+	for _, port := range []struct{ env, option string }{
+		{"SGE_QMASTER_PORT", "--qmaster-port="},
+		{"SGE_EXECD_PORT", "--execd-port="},
+	} {
+		if value := os.Getenv(port.env); value != "" {
+			args = append(args, port.option+value)
+		}
+	}
+	return args, nil
+}
+
+// spoolRoots returns the global execd_spool_dir and the distinct host-local
+// overrides from qconf -sconf <host>. A host whose override is added later
+// needs setup-qrmi-support or configure-queue-hooks to be run again.
+func spoolRoots(qc qconf.QConf) ([]string, error) {
+	var roots []string
+	add := func(dir string) {
+		if dir = strings.TrimSpace(dir); filepath.IsAbs(dir) && !slices.Contains(roots, filepath.Clean(dir)) {
+			roots = append(roots, filepath.Clean(dir))
+		}
+	}
+	if global, err := qc.ShowGlobalConfiguration(); err == nil && global != nil {
+		add(global.ExecdSpoolDir)
+	}
+	hosts, err := qc.ShowHostConfigurations()
+	if err != nil {
+		return nil, fmt.Errorf("list host configurations: %w", err)
+	}
+	for _, host := range hosts {
+		cfg, err := qc.ShowHostConfiguration(host)
+		if err != nil {
+			return nil, fmt.Errorf("show host configuration %q: %w", host, err)
+		}
+		if cfg.ExecdSpoolDir != nil {
+			add(*cfg.ExecdSpoolDir)
+		}
+	}
+	return roots, nil
+}
+
+// qrmiQueueHookCommand builds
+// "<user>@<launcher> <launcher args> <hook> <args> $job_owner".
+// OCS runs the command as user, with the job's environment, and replaces
+// $job_owner with the job's owner. The launcher drops that environment
+// before the dynamically linked hook starts.
+func qrmiQueueHookCommand(hook, launcher, user string, launcherArgs []string, args ...string) (string, error) {
+	hook = strings.TrimSpace(hook)
+	if hook == "NONE" {
+		return hook, nil
+	}
+	for _, path := range []string{hook, launcher} {
+		if strings.ContainsAny(path, " \t\r\n@") || !filepath.IsAbs(path) {
+			return "", fmt.Errorf("hook and launcher paths must be absolute, without whitespace or a user prefix (use --hook-user): %q", path)
+		}
+	}
+	if user == "" || strings.ContainsAny(user, "@ \t\r\n$") {
+		return "", fmt.Errorf("invalid hook user %q", user)
+	}
+	command := user + "@" + launcher
+	for _, arg := range append(append(append([]string{}, launcherArgs...), hook), args...) {
+		if arg == "" || strings.ContainsAny(arg, " \t\r\n") {
+			return "", errors.New("hook arguments must be non-empty and contain no whitespace")
+		}
+		command += " " + arg
+	}
+	return command + " $job_owner", nil
 }
 
 func configureGlobalQRMIReporting(qc qconf.QConf) error {

@@ -221,7 +221,7 @@ contract is:
 ```text
 GET /accessible
 POST /sessions
-DELETE /sessions/{id}
+DELETE /sessions with X-Warden-Session
 ```
 
 The Load Sensor only calls `GET /accessible`. The prolog and epilog use QRMI,

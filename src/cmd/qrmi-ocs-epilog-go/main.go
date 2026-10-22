@@ -15,9 +15,12 @@ package main
 
 import (
 	"errors"
+	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
+	"os/user"
 	"strconv"
 	"time"
 
@@ -25,24 +28,72 @@ import (
 	"github.com/hpc-gridware/qpu-resource/src/internal/qrmiocs"
 )
 
-const component = "qrmi-ocs-epilog"
+const (
+	component         = "qrmi-ocs-epilog"
+	defaultConfigPath = "/etc/qrmi/qrmi_config.json"
+)
 
 var log = qrmiocs.NewLogger(component)
 
+type hookConfig struct {
+	ConfigPath string
+	LogLevel   string
+	JobOwner   string
+}
+
 func main() {
-	os.Exit(run())
+	// qrmi-ocs-launch starts the hook with a clean environment; this is a
+	// second check in case the hook was started directly.
+	if err := qrmiocs.ResetProcessEnv(); err != nil {
+		log.Error("environment: %v", err)
+		os.Exit(qrmiocs.ExitCode(err))
+	}
+	cfg, err := parseHookArgs(os.Args[1:])
+	if err != nil {
+		log.Error("%v", err)
+		os.Exit(qrmiocs.ExitHostError)
+	}
+	os.Exit(run(cfg))
+}
+
+func parseHookArgs(args []string) (hookConfig, error) {
+	cfg := hookConfig{ConfigPath: defaultConfigPath}
+	fs := flag.NewFlagSet(component, flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.StringVar(&cfg.ConfigPath, "config", cfg.ConfigPath, "")
+	fs.StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "")
+	if err := fs.Parse(args); err != nil {
+		return hookConfig{}, err
+	}
+	if fs.NArg() > 1 {
+		return hookConfig{}, errors.New("expected at most one job-owner argument")
+	}
+	cfg.JobOwner = fs.Arg(0)
+	return cfg, nil
 }
 
 // run returns the process exit code so main can call os.Exit without
 // having to track success/failure through panics or defers.
 //
-// Exit semantics match the C version exactly: 0 on success, 1 on any
-// failure, but a missing metadata file is treated as success since it
-// means the prolog never recorded an acquisition for this job (for
-// example because the job was rejected before it ran).
-func run() int {
+// A missing metadata file is success: the prolog recorded no acquisition
+// for this job (for example because it requested no QPU). A failed release
+// is logged, recorded in accounting and moves the metadata file out of the
+// job spool, which OCS removes, for administrator recovery (see
+// qrmiocs.PreserveFailedRelease), but still exits 0: the job has finished,
+// and a non-zero code would put the queue instance into error state. Only
+// unreadable metadata or a missing spool directory exit 1.
+//
+// Exit semantics match the C version.
+func run(cfg hookConfig) int {
+	if level, ok := qrmiocs.RustLogFromDebug(cfg.LogLevel); ok {
+		_ = os.Setenv("RUST_LOG", level)
+	}
 	qrmi.SetLogCallback(log.QRMILog)
-	metaPath := qrmiocs.ResolveMetadataPath()
+	metaPath, err := qrmiocs.ResolveMetadataPath()
+	if err != nil {
+		log.Error("resolve metadata path: %v", err)
+		return 1
+	}
 	rec, readErr := qrmiocs.ReadStrictSingle(metaPath)
 	if readErr != nil && errors.Is(readErr, fs.ErrNotExist) {
 		log.Info("no metadata file found at %s; skipping release", metaPath)
@@ -51,29 +102,42 @@ func run() int {
 
 	start := time.Now()
 	failed := 0
+	exitCode := 0
 	if readErr != nil {
 		log.Error("read metadata %s: %v", metaPath, readErr)
 		failed = 1
-	} else if err := releaseRecord(rec); err != nil {
+		exitCode = qrmiocs.ExitHostError
+	} else if err := releaseRecord(cfg, rec); err != nil {
 		log.Error("%v", err)
 		failed = 1
 	}
 
-	if err := os.Remove(metaPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		log.Warn("failed to remove metadata file %s: %v", metaPath, err)
+	if failed == 0 {
+		if err := os.Remove(metaPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			log.Warn("failed to remove metadata file %s: %v", metaPath, err)
+		}
+	} else if kept, err := qrmiocs.PreserveFailedRelease(metaPath); err != nil {
+		log.Warn("failed to move metadata file %s out of the job spool for administrator recovery: %v", metaPath, err)
+	} else {
+		log.Warn("moved metadata for administrator recovery to %s", kept)
 	}
 
 	elapsed := int64(time.Since(start).Seconds())
 	publishSummary(failed, elapsed)
 
 	logSummary(failed, elapsed)
-	return failed
+	return exitCode
 }
 
 // releaseRecord opens a QRMI handle for the recorded resource and
-// releases its token. Errors are wrapped so the caller can log them
-// directly.
-func releaseRecord(rec qrmiocs.Record) error {
+// releases its token. QRMI reads the backend settings from the process
+// environment, which was reset in main; they are rebuilt here from
+// qrmi_config.json and the metadata record, as the prolog set them.
+// Errors are wrapped so the caller can log them directly.
+func releaseRecord(cfg hookConfig, rec qrmiocs.Record) error {
+	if err := setReleaseEnv(cfg, rec); err != nil {
+		return err
+	}
 	r, err := qrmi.NewResource(rec.Name, rec.Type)
 	if err != nil {
 		return fmt.Errorf("qrmi_resource_new(%s): %w", rec.Name, err)
@@ -82,6 +146,48 @@ func releaseRecord(rec qrmiocs.Record) error {
 
 	if err := r.Release(rec.Token); err != nil {
 		return fmt.Errorf("qrmi_resource_release(%s): %w", rec.Name, err)
+	}
+	return nil
+}
+
+func setReleaseEnv(cfg hookConfig, rec qrmiocs.Record) error {
+	qcfg, err := qrmi.LoadConfig(cfg.ConfigPath)
+	if err != nil {
+		return fmt.Errorf("load qrmi config %s: %w", cfg.ConfigPath, err)
+	}
+	defer qcfg.Close()
+	def, err := qcfg.ResourceDef(rec.Name)
+	if err != nil {
+		return fmt.Errorf("resource %q not in %s: %w", rec.Name, cfg.ConfigPath, err)
+	}
+	defer def.Close()
+
+	uid := os.Getuid()
+	if cfg.JobOwner != "" {
+		account, err := user.Lookup(cfg.JobOwner)
+		if err != nil {
+			return fmt.Errorf("look up scheduler job owner %q: %w", cfg.JobOwner, err)
+		}
+		if uid, err = strconv.Atoi(account.Uid); err != nil {
+			return fmt.Errorf("invalid uid %q for scheduler job owner %q", account.Uid, cfg.JobOwner)
+		}
+	}
+	jobID := os.Getenv("JOB_ID")
+	if task := os.Getenv("SGE_TASK_ID"); task != "" && task != "undefined" && task != "0" {
+		jobID += "." + task
+	}
+	pairs := [][2]string{
+		{"QRMI_JOB_UID", strconv.Itoa(uid)},
+		{"QRMI_JOB_ID", jobID},
+		{rec.Name + "_QRMI_JOB_ACQUISITION_TOKEN", rec.Token},
+	}
+	for _, e := range def.Environments() {
+		pairs = append(pairs, [2]string{rec.Name + "_" + e.Key, e.Value})
+	}
+	for _, kv := range pairs {
+		if err := os.Setenv(kv[0], kv[1]); err != nil {
+			return fmt.Errorf("setenv %s: %w", kv[0], err)
+		}
 	}
 	return nil
 }

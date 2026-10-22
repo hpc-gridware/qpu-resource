@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Multi-stage Docker build for the Go OCS queue hooks
-# (qrmi-ocs-prolog-go and qrmi-ocs-epilog-go).
+# (qrmi-ocs-prolog-go and qrmi-ocs-epilog-go) and the static qrmi-ocs-launch.
 #
 # Stage 1 builds libqrmi from upstream QRMI source so the Go hooks have
 # something to link against. Stage 2 cgo-builds the hooks against those
@@ -14,29 +14,37 @@
 #     --target export \
 #     --output type=local,dest=bin/go-hooks \
 #     -f scripts/Dockerfile.hooks \
-#     --build-arg QRMI_REF=v0.13.3 \
+#     --build-arg QRMI_REF=0.26.3 \
+#     --build-arg QRMI_FEATURES=munge \
 #     .
+#
+# QRMI_FEATURES=munge links libmunge at build time. Without it, QRMI 0.26.1
+# and later load libmunge.so.2 at run time, so pasqal-local (Warden) hosts
+# need libmunge.so.2 either way.
 #
 # Outputs in bin/go-hooks:
 #   qrmi-ocs-prolog
 #   qrmi-ocs-epilog
+#   qrmi-ocs-launch
 #   libqrmi.so
 
-ARG QRMI_REF=v0.13.3
-ARG GO_IMAGE=golang:1.24-bookworm
+ARG QRMI_REF=0.26.3
+ARG QRMI_FEATURES=
+ARG GO_IMAGE=golang:1.26-bookworm
 
 # ---------- Stage 1: build libqrmi.so + qrmi.h from upstream QRMI ----------
-FROM rust:1.91-bookworm AS qrmi-build
+FROM rust:1.98-bookworm AS qrmi-build
 ARG QRMI_REF
-RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates pkg-config libssl-dev \
+ARG QRMI_FEATURES
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates pkg-config libssl-dev libmunge-dev \
     && rm -rf /var/lib/apt/lists/*
 RUN git clone --depth 1 --branch ${QRMI_REF} https://github.com/qiskit-community/qrmi.git /qrmi-src
 WORKDIR /qrmi-src
-RUN cargo build --locked --release --lib
+RUN cargo build --locked --release --lib ${QRMI_FEATURES:+--features ${QRMI_FEATURES}}
 
 # ---------- Stage 2: cgo-build the Go hooks against libqrmi ----------
 FROM ${GO_IMAGE} AS go-build
-RUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev \
+RUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev libmunge-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy QRMI artifacts produced in stage 1.
@@ -55,6 +63,9 @@ ENV CGO_LDFLAGS="-L/qrmi -lqrmi -Wl,-rpath,\$ORIGIN"
 RUN go mod download
 RUN go build -tags qrmi -ldflags "-s -w" -o /out/qrmi-ocs-prolog ./src/cmd/qrmi-ocs-prolog-go
 RUN go build -tags qrmi -ldflags "-s -w" -o /out/qrmi-ocs-epilog ./src/cmd/qrmi-ocs-epilog-go
+# The launcher starts the hooks with a clean environment; it must be static
+# so that no dynamic loader reads the job's environment.
+RUN CGO_ENABLED=0 go build -ldflags "-s -w" -o /out/qrmi-ocs-launch ./src/cmd/qrmi-ocs-launch
 RUN cp /qrmi/libqrmi.so /out/libqrmi.so
 
 # ---------- Stage 3: export artifacts to the host ----------
