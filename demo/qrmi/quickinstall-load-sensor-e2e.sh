@@ -18,13 +18,14 @@ revoke_external() {
     docker exec "$OCS_CONTAINER" bash -lc \
       "cred=\$(munge -n | tr -d '\\n'); curl -fsS -X DELETE \
         -H \"X-Munge-Cred: \$cred\" \
-        ${WARDEN_URL}/sessions/${external_session}" >/dev/null || true
+        -H \"X-Warden-Session: ${external_session}\" \
+        ${WARDEN_URL}/sessions" >/dev/null || true
     external_session=
   fi
 }
 trap revoke_external EXIT
 
-docker exec "$OCS_CONTAINER" curl -fsS "${WARDEN_URL}/accessible" |
+docker exec "$OCS_CONTAINER" curl -fsS "${WARDEN_URL}/qpu-slots" |
   python3 -c "import json,sys; p=json.load(sys.stdin); assert p['qpu_slots_total']==${TOTAL_SLOTS}"
 
 job_key="ocs-e2e-$(date +%s)-$$"
@@ -32,7 +33,7 @@ external_session=$(docker exec "$OCS_CONTAINER" bash -lc \
   "cred=\$(munge -n | tr -d '\\n'); curl -fsS \
     -H \"X-Munge-Cred: \$cred\" \
     -H 'Content-Type: application/json' \
-    -d '{\"user_id\":\"0\",\"slurm_job_id\":\"${job_key}\",\"qpu_slots\":${EXTERNAL_SLOTS}}' \
+    -d '{\"user_id\":\"0\",\"scheduler_job_id\":\"${job_key}\",\"qpu_slots\":${EXTERNAL_SLOTS}}' \
     ${WARDEN_URL}/sessions" |
   python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
 

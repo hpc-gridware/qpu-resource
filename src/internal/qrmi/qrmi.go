@@ -28,3 +28,12 @@ type EnvVar struct {
 
 // LogFunc receives one QRMI log record from libqrmi.
 type LogFunc func(level, target, message string)
+
+// ResourceStatus is the part of a QRMI resource status that schedulers use.
+// Healthy, Busy and AvailableSlots are nil when the vendor does not report them.
+type ResourceStatus struct {
+	Online         bool
+	Healthy        *bool
+	Busy           *bool
+	AvailableSlots *int
+}
