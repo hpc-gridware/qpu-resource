@@ -5,6 +5,12 @@ Copyright 2026 Pasqal and its contributors.
 This runbook is for admins validating and operating QRMI integration on
 Gridware/Open Cluster Scheduler (OCS), with Pasqal Cloud only.
 
+For the resource model and job lifecycle, start with the
+[project overview](../README.md#architecture). This runbook covers the
+`EMU_FREE` cloud path; dynamic Pasqal Local readiness and capacity are covered
+in the [Load Sensor guide](../load_sensor.md). The pending Pasqal Local
+upstream changes listed there do not affect this released-QRMI cloud path.
+
 The same core scheduler commands are available in `demo/qrmi/quickinstall.sh`.
 
 ## 0) Admin Preconditions

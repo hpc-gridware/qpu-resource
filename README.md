@@ -32,7 +32,8 @@ repository.**
 | Paper capability | Implementation |
 | --- | --- |
 | Scheduler-native quantum resource selection and constraints | `qpu`, `qpu_slots`, and `qpu_ready` complexes configured by `gridware-adapter` |
-| Dynamic readiness and capacity | OCS Load Sensor with static and Pasqal Warden providers |
+| Dynamic readiness and capacity | OCS Load Sensor with static, QRMI and Pasqal Warden providers |
+| Submission-time checks | Optional Job Submission Verifier that rejects unusable `qpu` requests and adds `qpu_slots=1` |
 | Lifecycle management | QRMI acquisition in the queue prolog and release in the epilog |
 | Provider-independent configuration | Logical resource lookup through `qrmi_config.json` |
 | Runtime state and accounting | Per-job spool metadata, environment variables, and `qrmi_*` fields exposed through `qacct` |
@@ -117,6 +118,7 @@ are available. Resource names are administrator-defined entries in
 | --- | --- |
 | `src/cmd/gridware-adapter` | Configures complexes, host mappings, queue hooks, Load Sensors, and reporting |
 | `src/cmd/qrmi-ocs-load-sensor` | Publishes dynamic QPU readiness and capacity |
+| `src/cmd/qrmi-ocs-jsv` | Optional Job Submission Verifier for `qpu` requests |
 | `src/cmd/qrmi-ocs-prolog-go` / `qrmi-ocs-epilog-go` | Preferred Go lifecycle hooks |
 | `src/cmd/qrmi-ocs-launch` | Starts the hooks as the hook user with a clean environment |
 | `src/cmd/qrmi-ocs-prolog` / `qrmi-ocs-epilog` | Legacy C lifecycle hooks |
