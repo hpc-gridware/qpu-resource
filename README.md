@@ -305,6 +305,7 @@ load_sensor:
 warden:
   base_url: http://127.0.0.1:8006
   endpoint: /accessible
+  slots_endpoint: /qpu-slots
   tls_verify: true
 
 static:
@@ -315,9 +316,10 @@ static:
 The `static` provider either returns `static.ready` or reads `0`/`1` from
 `static.state_file`. It is a dummy readiness signal for paper/demo use and does
 not represent Pasqal Cloud queue availability. The `warden` provider polls
-`GET /accessible`, can report `qpu_slots_available` when Warden is configured
-with `qpu_slots_total`, and fails closed on timeouts, HTTP errors, or malformed
-responses.
+`GET /accessible` for readiness and, when a slots resource is configured,
+`GET /qpu-slots` for `qpu_slots_available`. It fails closed on timeouts, HTTP
+errors, or malformed responses. The `qrmi` provider reads any QRMI resource's
+`status()` and capacity, like the Slurm license poller; see `load_sensor.md`.
 
 The Load Sensor is an early scheduler filter only. The OCS prolog still calls
 QRMI `IsAccessible` and `Acquire`, so a job can still be rejected at dispatch
