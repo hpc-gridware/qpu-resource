@@ -28,6 +28,7 @@ help:
 	@echo "  vet                Run go vet over the module"
 	@echo "  build-adapter      Build gridware-adapter binary via Docker"
 	@echo "  build-load-sensor  Build optional OCS Load Sensor binary via Docker"
+	@echo "  build-jsv          Build optional OCS Job Submission Verifier via Docker"
 	@echo "  build-go-hooks     Build Go OCS prolog/epilog hooks and qrmi-ocs-launch via Docker"
 	@echo "                     (clones QRMI from upstream and links libqrmi.so)"
 	@echo ""
@@ -62,6 +63,17 @@ build-load-sensor:
 	  -w /work \
 	  $(ADAPTER_IMAGE) /bin/sh -lc \
 	  'export PATH=/usr/local/go/bin:$$PATH && go build -buildvcs=false -o $(ADAPTER_OUT)/qrmi-ocs-load-sensor ./src/cmd/qrmi-ocs-load-sensor'
+
+.PHONY: build-jsv
+build-jsv:
+	mkdir -p $(ADAPTER_OUT)
+	docker run --rm --user $(shell id -u):$(shell id -g) \
+	  -e GOCACHE=/tmp/go-build \
+	  -e GOPATH=/tmp/go \
+	  -v "$(CURDIR)":/work \
+	  -w /work \
+	  $(ADAPTER_IMAGE) /bin/sh -lc \
+	  'export PATH=/usr/local/go/bin:$$PATH && go build -buildvcs=false -o $(ADAPTER_OUT)/qrmi-ocs-jsv ./src/cmd/qrmi-ocs-jsv'
 
 .PHONY: build-go-hooks
 build-go-hooks:
